@@ -13,7 +13,9 @@ RUN npm run build
 FROM node:22-alpine
 WORKDIR /app
 
-RUN npm install --prefix /app @libsql/client@^0.14.0 ioredis@^5.0.0 --omit=dev
+RUN npm install --prefix /app @libsql/client@^0.14.0 ioredis@^5.0.0 libsodium-wrappers@^0.7.16 libsodium@^0.7.16 --omit=dev && \
+    cp /app/node_modules/libsodium/dist/modules-esm/libsodium.mjs \
+       /app/node_modules/libsodium-wrappers/dist/modules-esm/libsodium.mjs
 
 RUN echo '{"type":"module"}' > package.json
 

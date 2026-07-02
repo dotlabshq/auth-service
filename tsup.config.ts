@@ -18,5 +18,5 @@ export default defineConfig({
     'zod',
     'drizzle-orm',
   ],
-  external: ['@libsql/client', 'ioredis'],
+  external: ['@libsql/client', 'ioredis', 'libsodium-wrappers'],
 })

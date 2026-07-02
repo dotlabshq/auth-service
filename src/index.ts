@@ -11,7 +11,7 @@ app.use('*', logger())
 app.get('/healthz', (c) => c.json({ ok: true, service: 'auth-service' }))
 
 const env = createEnv()
-const db  = createDB(env.db('DB'))
+const db  = createDB(env.libsql('DB'))
 const kv  = env.kv('KV')
 
 app.route('/', oidcRouter(db))
