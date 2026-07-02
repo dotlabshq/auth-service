@@ -1,6 +1,7 @@
 image := "ghcr.io/dotlabshq/auth-service"
 
 build:
+    pnpm update
     pnpm build
 
 patch: build
@@ -12,7 +13,7 @@ build-docker tag="latest":
 push-docker tag="latest":
     docker push {{image}}:{{tag}}
 
-release tag:
+release-docker tag:
     just build-docker {{tag}}
     just push-docker {{tag}}
 
