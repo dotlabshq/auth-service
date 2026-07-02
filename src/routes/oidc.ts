@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import { getCookie } from 'hono/cookie'
 import { generatePkce, buildOidcAuthUrl } from '@baseworks/auth/pkce'
 import { createUserRepo } from '@baseworks/account'
+import { createOrganizationWithDefaults } from '@baseworks/organization'
 import {
   cookieOpts, encodeSession, ALL_OIDC_COOKIES,
   COOKIE_PKCE, COOKIE_RETURN_TO, COOKIE_ID_TOKEN, COOKIE_SESSION, COOKIE_ACCESS, COOKIE_REFRESH,
@@ -9,6 +10,7 @@ import {
 import { parseJwtPayload } from '@baseworks/auth/jwt'
 import type { DB } from '../db/client.js'
 import { schema } from '../db/client.js'
+import { eq } from 'drizzle-orm'
 
 function getConfig(env: Record<string, string | undefined>) {
   return {
@@ -93,7 +95,28 @@ export function oidcRouter(db: DB) {
     const expiresAt = (payload['exp'] as number | undefined) ?? Math.floor(Date.now() / 1000) + (data.expires_in ?? 3600)
 
     if (subject && email && issuer) {
-      await userRepo.upsert({ subject, issuer, email, name, picture })
+      const user = await userRepo.upsert({ subject, issuer, email, name, picture })
+
+      // Provision org for new users with no membership
+      const existing = await db
+        .select({ id: schema.orgMemberships.id })
+        .from(schema.orgMemberships)
+        .where(eq(schema.orgMemberships.userId, user.id))
+        .limit(1)
+
+      if (!existing.length) {
+        const emailPrefix = email.includes('@') ? email.split('@')[0]! : email
+        const slug = emailPrefix.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'my-org'
+        const { organization } = await createOrganizationWithDefaults(db, schema, { name: emailPrefix, slug })
+        await db.insert(schema.orgMemberships).values({
+          id:             crypto.randomUUID(),
+          organizationId: organization.id,
+          userId:         user.id,
+          role:           'owner',
+          createdAt:      Math.floor(Date.now() / 1000),
+          updatedAt:      Math.floor(Date.now() / 1000),
+        })
+      }
     }
 
     const session = encodeSession({

@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import { getCookie } from 'hono/cookie'
+import { eq } from 'drizzle-orm'
 import { createUserRepo } from '@baseworks/account'
 import { parseJwtPayload, signHs256Jwt, verifyHs256Jwt } from '@baseworks/auth/jwt'
 import type { KvClient } from '@dotlabshq/flect-sdk'
@@ -67,7 +68,7 @@ export function cliRouter(db: DB, kv: KvClient) {
     const idToken = getCookie(c, COOKIE_ID_TOKEN)
     if (!idToken) {
       const base = (process.env['APP_PUBLIC_URL'] ?? '').replace(/\/+$/, '')
-      return c.redirect(`${base}/v1/auth/login?redirectTo=/v1/auth/token?state=${state}`)
+      return c.redirect(`${base}/v1/auth/login?redirectTo=/token?state=${state}`)
     }
     return c.html(tokenPage(state))
   })
@@ -105,9 +106,17 @@ export function cliRouter(db: DB, kv: KvClient) {
     const user = await userRepo.findBySubject(issuer, subject)
     if (!user) return c.json({ error: 'user_not_found' }, 404)
 
-    // identity JWT — no org, just who the user is
+    // Resolve primary org for this user
+    const membership = await db
+      .select({ organizationId: schema.orgMemberships.organizationId, role: schema.orgMemberships.role })
+      .from(schema.orgMemberships)
+      .where(eq(schema.orgMemberships.userId, user.id))
+      .limit(1)
+    const orgId = membership[0]?.organizationId
+
+    // identity JWT with org_id so downstream services can resolve memberships
     const token = signHs256Jwt(
-      { sub: user.id, type: 'human' },
+      { sub: user.id, org_id: orgId, type: 'human' },
       jwtSecret(),
       IDENTITY_TTL,
     )
