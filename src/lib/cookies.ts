@@ -7,6 +7,7 @@ export const COOKIE_ACCESS      = 'oidc_access_token'
 export const COOKIE_REFRESH     = 'oidc_refresh_token'
 export const COOKIE_PKCE        = 'oidc_pkce_verifier'
 export const COOKIE_RETURN_TO   = 'oidc_return_to'
+export const COOKIE_PLATFORM_JWT = 'platform_jwt'
 
 export const ALL_OIDC_COOKIES = [
   COOKIE_ID_TOKEN, COOKIE_SESSION, COOKIE_ACCESS, COOKIE_REFRESH,

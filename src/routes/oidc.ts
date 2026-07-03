@@ -6,8 +6,10 @@ import { createOrganizationWithDefaults } from '@baseworks/organization'
 import {
   cookieOpts, encodeSession, ALL_OIDC_COOKIES,
   COOKIE_PKCE, COOKIE_RETURN_TO, COOKIE_ID_TOKEN, COOKIE_SESSION, COOKIE_ACCESS, COOKIE_REFRESH,
+  parseSession,
 } from '../lib/cookies.js'
-import { parseJwtPayload } from '@baseworks/auth/jwt'
+import { signHs256Jwt } from '@baseworks/auth/jwt'
+import { tokenPage } from '../pages/token.js'
 import type { DB } from '../db/client.js'
 import { schema } from '../db/client.js'
 import { eq } from 'drizzle-orm'
@@ -94,28 +96,40 @@ export function oidcRouter(db: DB) {
     const issuer    = payload['iss'] as string | undefined
     const expiresAt = (payload['exp'] as number | undefined) ?? Math.floor(Date.now() / 1000) + (data.expires_in ?? 3600)
 
+    let platformUserId: string | undefined
+    let platformOrgId:  string | undefined
+
     if (subject && email && issuer) {
       const user = await userRepo.upsert({ subject, issuer, email, name, picture })
+      platformUserId = user.id
 
       // Provision org for new users with no membership
       const existing = await db
-        .select({ id: schema.orgMemberships.id })
+        .select({ id: schema.orgMemberships.id, organizationId: schema.orgMemberships.organizationId })
         .from(schema.orgMemberships)
         .where(eq(schema.orgMemberships.userId, user.id))
         .limit(1)
 
-      if (!existing.length) {
-        const emailPrefix = email.includes('@') ? email.split('@')[0]! : email
-        const slug = emailPrefix.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'my-org'
-        const { organization } = await createOrganizationWithDefaults(db, schema, { name: emailPrefix, slug })
-        await db.insert(schema.orgMemberships).values({
-          id:             crypto.randomUUID(),
-          organizationId: organization.id,
-          userId:         user.id,
-          role:           'owner',
-          createdAt:      Math.floor(Date.now() / 1000),
-          updatedAt:      Math.floor(Date.now() / 1000),
-        })
+      const createDefaultOrg = process.env['CREATE_DEFAULT_ORG'] === 'true'
+      if (createDefaultOrg && !existing.length) {
+        try {
+          const emailPrefix = email.includes('@') ? email.split('@')[0]! : email
+          const slug = emailPrefix.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'my-org'
+          const { organization } = await createOrganizationWithDefaults(db, schema, { name: emailPrefix, slug })
+          await db.insert(schema.orgMemberships).values({
+            id:             crypto.randomUUID(),
+            organizationId: organization.id,
+            userId:         user.id,
+            role:           'owner',
+            createdAt:      Math.floor(Date.now() / 1000),
+            updatedAt:      Math.floor(Date.now() / 1000),
+          })
+          platformOrgId = organization.id
+        } catch (err) {
+          console.error('[oidc] org provisioning failed:', err)
+        }
+      } else {
+        platformOrgId = existing[0]?.organizationId
       }
     }
 
@@ -136,6 +150,22 @@ export function oidcRouter(db: DB) {
     c.header('Set-Cookie', `${COOKIE_RETURN_TO}=; ${clearOpt}`, { append: true })
     c.header('Set-Cookie', `${COOKIE_ID_TOKEN}=${data.id_token}; ${opts}; Expires=${expires}`, { append: true })
     c.header('Set-Cookie', `${COOKIE_SESSION}=${session}; ${opts}; Expires=${expires}`, { append: true })
+
+    // Platform JWT cookie — set on browser login so all services can read it directly.
+    // Same JWT the CLI gets via /v1/auth/token.
+    if (platformUserId && platformOrgId) {
+      const jwtSecret = process.env['JWT_SECRET']
+      if (jwtSecret) {
+        const platformTtl = expiresAt - Math.floor(Date.now() / 1000)
+        const platformJwt = signHs256Jwt(
+          { sub: platformUserId, org_id: platformOrgId, type: 'human' },
+          jwtSecret,
+          platformTtl,
+        )
+        c.header('Set-Cookie', `oidc_token=${platformJwt}; ${opts}; Expires=${expires}`, { append: true })
+      }
+    }
+
     if (data.access_token) {
       c.header('Set-Cookie', `${COOKIE_ACCESS}=${data.access_token}; ${opts}; Expires=${expires}`, { append: true })
     }
@@ -189,6 +219,56 @@ export function oidcRouter(db: DB) {
 
     const target = redirectTo.startsWith('/') ? `${cfg.appUrl}${redirectTo}` : redirectTo
     return c.redirect(target)
+  })
+
+  // GET /token
+  // - CLI flow  (state param present): session yoksa login'e redirect, varsa approve HTML göster
+  // - API flow  (state param yoksa):   session yoksa 401, varsa JWT JSON döndür
+  app.get('/token', async (c) => {
+    const state   = c.req.query('state')
+    const session = parseSession(c)
+    const base    = (process.env['APP_PUBLIC_URL'] ?? '').replace(/\/+$/, '')
+
+    if (!session?.isAuthenticated) {
+      if (!state) return c.json({ error: 'not_authenticated' }, 401)
+      // CLI flow: OIDC login'e yönlendir, state'i returnTo ile koru
+      const redirectTo = `/token?state=${state}`
+      return c.redirect(`${base}/v1/auth/login?redirectTo=${encodeURIComponent(redirectTo)}`)
+    }
+
+    // CLI flow: session var → approve sayfasını göster
+    if (state) {
+      return c.html(tokenPage(state))
+    }
+
+    // API flow: session var, state yok → direkt JWT döndür (web client)
+    const jwtSecret = process.env['JWT_SECRET']
+    if (!jwtSecret) return c.json({ error: 'JWT_SECRET not configured' }, 500)
+
+    const user = await userRepo.findBySubject(session.issuer, session.subject)
+    if (!user) return c.json({ error: 'user_not_found' }, 404)
+
+    const membership = await db
+      .select({ organizationId: schema.orgMemberships.organizationId })
+      .from(schema.orgMemberships)
+      .where(eq(schema.orgMemberships.userId, user.id))
+      .limit(1)
+
+    const orgId   = membership[0]?.organizationId
+    const ttl     = Math.max(session.expiresAt - Math.floor(Date.now() / 1000), 60)
+    const expires = new Date(session.expiresAt * 1000).toUTCString()
+    const cfg     = getConfig(process.env as Record<string, string | undefined>)
+
+    const token = signHs256Jwt(
+      { sub: user.id, org_id: orgId, type: 'human' },
+      jwtSecret,
+      ttl,
+    )
+
+    const opts = cookieOpts(cfg.isProd, cfg.cookieDomain)
+    c.header('Set-Cookie', `oidc_token=${token}; ${opts}; Expires=${expires}`, { append: true })
+
+    return c.json({ token, token_type: 'bearer', expires_in: ttl })
   })
 
   return app

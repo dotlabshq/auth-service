@@ -1,13 +1,12 @@
 import { Hono } from 'hono'
-import { getCookie } from 'hono/cookie'
 import { eq } from 'drizzle-orm'
 import { createUserRepo } from '@baseworks/account'
-import { parseJwtPayload, signHs256Jwt, verifyHs256Jwt } from '@baseworks/auth/jwt'
+import { signHs256Jwt, verifyHs256Jwt } from '@baseworks/auth/jwt'
 import type { KvClient } from '@dotlabshq/flect-sdk'
 import type { DB } from '../db/client.js'
 import { schema } from '../db/client.js'
-import { COOKIE_ID_TOKEN } from '../lib/cookies.js'
-import { tokenPage, donePage } from '../pages/token.js'
+import { parseSession } from '../lib/cookies.js'
+import { donePage } from '../pages/token.js'
 
 const KV_PFX          = 'auth:cli:'
 const TTL             = 600
@@ -61,32 +60,15 @@ export function cliRouter(db: DB, kv: KvClient) {
     return c.json({ status: data.status })
   })
 
-  // GET /token — browser approve page
-  app.get('/token', (c) => {
-    const state = c.req.query('state')
-    if (!state) return c.html('<p>Invalid link. No state found.</p>', 400)
-    const idToken = getCookie(c, COOKIE_ID_TOKEN)
-    if (!idToken) {
-      const base = (process.env['APP_PUBLIC_URL'] ?? '').replace(/\/+$/, '')
-      return c.redirect(`${base}/v1/auth/login?redirectTo=/token?state=${state}`)
-    }
-    return c.html(tokenPage(state))
-  })
-
   // GET /token/done
   app.get('/token/done', (c) => c.html(donePage()))
 
-  // POST /approve — browser form submit → issues identity JWT
+  // POST /approve — browser form submit → issues identity JWT, writes to KV
   app.post('/approve', async (c) => {
-    const idToken = getCookie(c, COOKIE_ID_TOKEN)
-    if (!idToken) return c.json({ error: 'not_authenticated' }, 401)
+    const session = parseSession(c)
+    if (!session?.isAuthenticated) return c.json({ error: 'not_authenticated' }, 401)
 
-    const payload = parseJwtPayload(idToken)
-    if (!payload) return c.json({ error: 'invalid_token' }, 401)
-
-    const subject = payload['sub'] as string | undefined
-    const issuer  = (payload['iss'] as string | undefined) ?? ''
-    if (!subject) return c.json({ error: 'missing_subject' }, 401)
+    const { subject, issuer } = session
 
     const ct = c.req.header('content-type') ?? ''
     let state: string | undefined
