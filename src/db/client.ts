@@ -1,12 +1,29 @@
-import type { LibSqlClient } from '@dotlabshq/flect-sdk'
-import { drizzle } from 'drizzle-orm/libsql'
-import * as accountSchema from '@baseworks/account/schema/sqlite'
-import * as orgSchema from '@baseworks/organization/schema/sqlite'
+import type { Redis } from 'ioredis'
 
-export const schema = { ...accountSchema, ...orgSchema }
-export type DB = ReturnType<typeof createDB>
+/**
+ * The small KV surface the OIDC/CLI routes need. With @getflect/sdk the resolved
+ * cache client is a raw ioredis instance, so `kvAdapter` re-exposes the
+ * get/set/del shape the routers were written against (ioredis `set(k,v,'EX',s)`
+ * vs the old SDK's `set(k,v,{ttl})`).
+ *
+ * auth keeps no database — identity + org data live in IAM — so this file is the
+ * whole persistence surface: a cache for OIDC PKCE state and CLI login states.
+ */
+export interface KvClient {
+  get(key: string): Promise<string | null>
+  set(key: string, value: string, opts?: { ttl?: number }): Promise<void>
+  del(key: string): Promise<void>
+}
 
-export function createDB(dbClient: LibSqlClient) {
-  // LibSqlClient implements the @libsql/client Client interface
-  return drizzle(dbClient as never, { schema })
+export function kvAdapter(redis: Redis): KvClient {
+  return {
+    get: (key) => redis.get(key),
+    set: async (key, value, opts) => {
+      if (opts?.ttl) await redis.set(key, value, 'EX', opts.ttl)
+      else await redis.set(key, value)
+    },
+    del: async (key) => {
+      await redis.del(key)
+    },
+  }
 }

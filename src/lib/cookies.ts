@@ -29,6 +29,14 @@ export interface OidcSession {
   name: string
   issuer: string
   expiresAt: number
+  /**
+   * Resolved platform identity — the IAM user id in IAM mode, or the OIDC
+   * subject in login-only mode. Stored here so `/token` and CLI `/approve` mint
+   * JWTs without a database round-trip.
+   */
+  userId?: string
+  /** Resolved org id, when known (IAM mode with an org). Absent in login-only. */
+  orgId?: string
 }
 
 export function parseSession(c: Context): OidcSession | null {

@@ -1,11 +1,8 @@
 import { Hono } from 'hono'
-import { eq } from 'drizzle-orm'
-import { createUserRepo } from '@baseworks/account'
 import { signHs256Jwt, verifyHs256Jwt } from '@baseworks/auth/jwt'
-import type { KvClient } from '@dotlabshq/flect-sdk'
-import type { DB } from '../db/client.js'
-import { schema } from '../db/client.js'
+import type { KvClient } from '../db/client.js'
 import { parseSession } from '../lib/cookies.js'
+import { iamEnabled, iamMembershipRole } from '../lib/iam.js'
 import { donePage } from '../pages/token.js'
 
 const KV_PFX          = 'auth:cli:'
@@ -14,14 +11,6 @@ const IDENTITY_TTL    = 86400      // 24h
 const ORG_TOKEN_TTL   = 14400     // 4h
 
 function stateKey(state: string) { return `${KV_PFX}${state}` }
-
-function appUrl(c: { req: { url: string; header(name: string): string | undefined } }): string {
-  if (process.env['APP_PUBLIC_URL']) return process.env['APP_PUBLIC_URL'].replace(/\/+$/, '')
-  const url  = new URL(c.req.url)
-  const host = c.req.header('x-forwarded-host') ?? url.hostname
-  const proto = c.req.header('x-forwarded-proto') ?? url.protocol.replace(':', '')
-  return `${proto}://${host}`
-}
 
 function randomState(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(16))
@@ -36,9 +25,8 @@ function jwtSecret(): string {
 
 type CliStatus = { status: 'pending' } | { status: 'done'; token: string }
 
-export function cliRouter(db: DB, kv: KvClient) {
-  const app      = new Hono()
-  const userRepo = createUserRepo(db, schema)
+export function cliRouter(kv: KvClient) {
+  const app = new Hono()
 
   // GET /start
   app.get('/start', async (c) => {
@@ -68,7 +56,7 @@ export function cliRouter(db: DB, kv: KvClient) {
     const session = parseSession(c)
     if (!session?.isAuthenticated) return c.json({ error: 'not_authenticated' }, 401)
 
-    const { subject, issuer } = session
+    const { subject } = session
 
     const ct = c.req.header('content-type') ?? ''
     let state: string | undefined
@@ -85,20 +73,14 @@ export function cliRouter(db: DB, kv: KvClient) {
     const data = JSON.parse(raw) as CliStatus
     if (data.status !== 'pending') return c.json({ error: 'already_used' }, 409)
 
-    const user = await userRepo.findBySubject(issuer, subject)
-    if (!user) return c.json({ error: 'user_not_found' }, 404)
-
-    // Resolve primary org for this user
-    const membership = await db
-      .select({ organizationId: schema.orgMemberships.organizationId, role: schema.orgMemberships.role })
-      .from(schema.orgMemberships)
-      .where(eq(schema.orgMemberships.userId, user.id))
-      .limit(1)
-    const orgId = membership[0]?.organizationId
+    // Identity + org were resolved at OIDC callback and carried in the session
+    // (IAM user id + org in IAM mode; the OIDC subject in login-only mode) — no
+    // database lookup here.
+    const userId = session.userId ?? subject
 
     // identity JWT with org_id so downstream services can resolve memberships
     const token = signHs256Jwt(
-      { sub: user.id, org_id: orgId, type: 'human' },
+      { sub: userId, org_id: session.orgId, type: 'human' },
       jwtSecret(),
       IDENTITY_TTL,
     )
@@ -124,21 +106,16 @@ export function cliRouter(db: DB, kv: KvClient) {
 
     const userId = claims['sub'] as string
 
-    // verify membership
-    const { eq, and } = await import('drizzle-orm')
-    const rows = await db
-      .select({ role: schema.orgMemberships.role })
-      .from(schema.orgMemberships)
-      .where(and(
-        eq(schema.orgMemberships.userId, userId),
-        eq(schema.orgMemberships.organizationId, org_id),
-      ))
-      .limit(1)
+    // Org selection only exists when IAM is present — login-only auth has no
+    // orgs to scope to.
+    if (!iamEnabled()) return c.json({ error: 'org_selection_unavailable' }, 400)
 
-    if (!rows[0]) return c.json({ error: 'not_a_member' }, 403)
+    // Verify membership through IAM (deny if the user has no role in the org).
+    const role = await iamMembershipRole(userId, org_id)
+    if (!role) return c.json({ error: 'not_a_member' }, 403)
 
     const orgToken = signHs256Jwt(
-      { sub: userId, org_id, role: rows[0].role, type: 'human' },
+      { sub: userId, org_id, role, type: 'human' },
       jwtSecret(),
       ORG_TOKEN_TTL,
     )

@@ -1,8 +1,12 @@
-import { describe, it, expect, beforeEach } from 'vitest'
-import { createTestApp, makeIdentityToken, makeOrgToken, makeSessionCookie, SESSION_COOKIE_NAME } from './setup.js'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import {
+  createTestApp, installIamMock,
+  makeIdentityToken, makeOrgToken, makeSessionCookie, SESSION_COOKIE_NAME,
+} from './setup.js'
 
 type App = Awaited<ReturnType<typeof createTestApp>>
 let app: App
+let restoreFetch: (() => void) | undefined
 
 async function json<T>(res: Response): Promise<T> {
   return res.json() as Promise<T>
@@ -10,6 +14,11 @@ async function json<T>(res: Response): Promise<T> {
 
 beforeEach(async () => {
   app = await createTestApp()
+})
+
+afterEach(() => {
+  restoreFetch?.()
+  restoreFetch = undefined
 })
 
 // ─── GET /start ───────────────────────────────────────────────────
@@ -60,7 +69,6 @@ describe('GET /poll/:state — check CLI auth status', () => {
 
   it('returns done + token and clears KV when approved', async () => {
     const { state } = await json<{ state: string }>(await app.get('/start'))
-    // Simulate approved: manually set done in KV
     await app.kv.set(`auth:cli:${state}`, JSON.stringify({ status: 'done', token: 'test-jwt' }))
 
     const res = await app.get(`/poll/${state}`)
@@ -69,22 +77,19 @@ describe('GET /poll/:state — check CLI auth status', () => {
     expect(body.status).toBe('done')
     expect(body.token).toBe('test-jwt')
 
-    // KV entry must be removed after done is returned
     const remaining = await app.kv.get(`auth:cli:${state}`)
     expect(remaining).toBeNull()
   })
 })
 
-// ─── POST /token-for-org ──────────────────────────────────────────
+// ─── POST /token-for-org (IAM mode) ───────────────────────────────
 
-describe('POST /token-for-org — exchange identity JWT for org-scoped JWT', () => {
+describe('POST /token-for-org — exchange identity JWT for org-scoped JWT (IAM mode)', () => {
+  beforeEach(async () => { app = await createTestApp({ iam: true }) })
+
   it('returns org-scoped token for a valid member', async () => {
-    const user = await app.seedUser()
-    const org  = await app.seedOrg()
-    await app.seedMembership(user.id, org.id, 'admin')
-
-    const identityToken = makeIdentityToken(user.id)
-    const res = await app.post('/token-for-org', { org_id: org.id }, { token: identityToken })
+    restoreFetch = installIamMock({ 'user-1': [{ id: 'org-1', role: 'admin' }] })
+    const res = await app.post('/token-for-org', { org_id: 'org-1' }, { token: makeIdentityToken('user-1') })
     expect(res.status).toBe(200)
     const body = await json<{ token: string; expires_in: number }>(res)
     expect(typeof body.token).toBe('string')
@@ -92,60 +97,53 @@ describe('POST /token-for-org — exchange identity JWT for org-scoped JWT', () 
   })
 
   it('returns 401 without Authorization header', async () => {
-    const org = await app.seedOrg()
-    const res = await app.post('/token-for-org', { org_id: org.id })
+    const res = await app.post('/token-for-org', { org_id: 'org-1' })
     expect(res.status).toBe(401)
   })
 
   it('returns 401 for invalid/expired token', async () => {
-    const org = await app.seedOrg()
-    const res = await app.post('/token-for-org', { org_id: org.id }, { token: 'not.a.jwt' })
+    const res = await app.post('/token-for-org', { org_id: 'org-1' }, { token: 'not.a.jwt' })
     expect(res.status).toBe(401)
   })
 
   it('returns 400 when token is already org-scoped', async () => {
-    const user = await app.seedUser()
-    const org  = await app.seedOrg()
-    await app.seedMembership(user.id, org.id, 'member')
-    const orgToken = makeOrgToken(user.id, org.id)
-    const res = await app.post('/token-for-org', { org_id: org.id }, { token: orgToken })
+    const res = await app.post('/token-for-org', { org_id: 'org-1' }, { token: makeOrgToken('user-1', 'org-1') })
     expect(res.status).toBe(400)
-    const { error } = await json<{ error: string }>(res)
-    expect(error).toBe('already_org_scoped')
+    expect((await json<{ error: string }>(res)).error).toBe('already_org_scoped')
   })
 
   it('returns 403 when user is not a member', async () => {
-    const user = await app.seedUser()
-    const org  = await app.seedOrg()
-    // No membership inserted
-    const identityToken = makeIdentityToken(user.id)
-    const res = await app.post('/token-for-org', { org_id: org.id }, { token: identityToken })
+    restoreFetch = installIamMock({ 'user-1': [] })
+    const res = await app.post('/token-for-org', { org_id: 'org-1' }, { token: makeIdentityToken('user-1') })
     expect(res.status).toBe(403)
-    const { error } = await json<{ error: string }>(res)
-    expect(error).toBe('not_a_member')
+    expect((await json<{ error: string }>(res)).error).toBe('not_a_member')
   })
 
   it('returns 400 when org_id is missing from body', async () => {
-    const user  = await app.seedUser()
-    const token = makeIdentityToken(user.id)
-    const res   = await app.post('/token-for-org', {}, { token })
+    const res = await app.post('/token-for-org', {}, { token: makeIdentityToken('user-1') })
     expect(res.status).toBe(400)
   })
 
-  it('issued token encodes correct role', async () => {
+  it('issued token encodes the role IAM reports', async () => {
     const { verifyHs256Jwt } = await import('@baseworks/auth/jwt')
-    const user = await app.seedUser()
-    const org  = await app.seedOrg()
-    await app.seedMembership(user.id, org.id, 'owner')
-
-    const identityToken = makeIdentityToken(user.id)
+    restoreFetch = installIamMock({ 'user-1': [{ id: 'org-1', role: 'owner' }] })
     const { token } = await json<{ token: string }>(
-      await app.post('/token-for-org', { org_id: org.id }, { token: identityToken })
+      await app.post('/token-for-org', { org_id: 'org-1' }, { token: makeIdentityToken('user-1') }),
     )
     const claims = verifyHs256Jwt(token, process.env['JWT_SECRET']!)
     expect(claims?.['role']).toBe('owner')
-    expect(claims?.['org_id']).toBe(org.id)
-    expect(claims?.['sub']).toBe(user.id)
+    expect(claims?.['org_id']).toBe('org-1')
+    expect(claims?.['sub']).toBe('user-1')
+  })
+})
+
+// ─── POST /token-for-org (login-only mode) ────────────────────────
+
+describe('POST /token-for-org — login-only mode has no orgs', () => {
+  it('returns 400 org_selection_unavailable when IAM is absent', async () => {
+    const res = await app.post('/token-for-org', { org_id: 'org-1' }, { token: makeIdentityToken('user-1') })
+    expect(res.status).toBe(400)
+    expect((await json<{ error: string }>(res)).error).toBe('org_selection_unavailable')
   })
 })
 
@@ -155,20 +153,18 @@ describe('GET /session — browser session check', () => {
   it('returns 401 when no session cookie', async () => {
     const res = await app.get('/session')
     expect(res.status).toBe(401)
-    const { isAuthenticated } = await json<{ isAuthenticated: boolean }>(res)
-    expect(isAuthenticated).toBe(false)
+    expect((await json<{ isAuthenticated: boolean }>(res)).isAuthenticated).toBe(false)
   })
 
   it('returns 200 with authenticated session cookie', async () => {
-    const sessionData = {
+    const cookie = makeSessionCookie({
       isAuthenticated: true,
       subject: 'sub-001',
       email: 'user@test.com',
       name: 'Test User',
       issuer: 'https://auth.test',
       expiresAt: Math.floor(Date.now() / 1000) + 3600,
-    }
-    const cookie = makeSessionCookie(sessionData)
+    })
     const res = await app.get('/session', { cookie: `${SESSION_COOKIE_NAME}=${cookie}` })
     expect(res.status).toBe(200)
     const body = await json<{ isAuthenticated: boolean; email: string }>(res)
@@ -188,12 +184,51 @@ describe('GET /session — browser session check', () => {
   })
 })
 
-// ─── GET /healthz ─────────────────────────────────────────────────
+// ─── GET /token (API flow) ────────────────────────────────────────
 
-describe('healthz', () => {
-  it('returns ok', async () => {
-    // healthz is on index.ts not the routers, but ensure routes are healthy
-    // Test that the app handles unknown routes gracefully (not 500)
+describe('GET /token — mints a JWT from the session (no database)', () => {
+  it('login-only: token carries the OIDC subject as sub and no org_id', async () => {
+    const { verifyHs256Jwt } = await import('@baseworks/auth/jwt')
+    const cookie = makeSessionCookie({
+      isAuthenticated: true,
+      subject: 'sub-xyz', email: 'a@b.com', name: 'A', issuer: 'https://auth.test',
+      expiresAt: Math.floor(Date.now() / 1000) + 3600,
+      userId: 'sub-xyz',
+    })
+    const res = await app.get('/token', { cookie: `${SESSION_COOKIE_NAME}=${cookie}` })
+    expect(res.status).toBe(200)
+    const { token } = await json<{ token: string }>(res)
+    const claims = verifyHs256Jwt(token, process.env['JWT_SECRET']!)
+    expect(claims?.['sub']).toBe('sub-xyz')
+    expect(claims?.['org_id']).toBeUndefined()
+  })
+
+  it('IAM mode: token carries the resolved userId + orgId from the session', async () => {
+    const { verifyHs256Jwt } = await import('@baseworks/auth/jwt')
+    const cookie = makeSessionCookie({
+      isAuthenticated: true,
+      subject: 'sub-xyz', email: 'a@b.com', name: 'A', issuer: 'https://auth.test',
+      expiresAt: Math.floor(Date.now() / 1000) + 3600,
+      userId: 'iam-user-1', orgId: 'iam-org-1',
+    })
+    const res = await app.get('/token', { cookie: `${SESSION_COOKIE_NAME}=${cookie}` })
+    expect(res.status).toBe(200)
+    const { token } = await json<{ token: string }>(res)
+    const claims = verifyHs256Jwt(token, process.env['JWT_SECRET']!)
+    expect(claims?.['sub']).toBe('iam-user-1')
+    expect(claims?.['org_id']).toBe('iam-org-1')
+  })
+
+  it('returns 401 without a session', async () => {
+    const res = await app.get('/token')
+    expect(res.status).toBe(401)
+  })
+})
+
+// ─── unknown routes ───────────────────────────────────────────────
+
+describe('routing', () => {
+  it('does not 500 on unknown routes', async () => {
     const res = await app.get('/no-such-route')
     expect(res.status).not.toBe(500)
   })

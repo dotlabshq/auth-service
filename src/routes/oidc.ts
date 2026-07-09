@@ -1,18 +1,31 @@
 import { Hono } from 'hono'
 import { getCookie } from 'hono/cookie'
 import { generatePkce, buildOidcAuthUrl } from '@baseworks/auth/pkce'
-import { createUserRepo } from '@baseworks/account'
-import { createOrganizationWithDefaults } from '@baseworks/organization'
 import {
   cookieOpts, encodeSession, ALL_OIDC_COOKIES,
   COOKIE_PKCE, COOKIE_RETURN_TO, COOKIE_ID_TOKEN, COOKIE_SESSION, COOKIE_ACCESS, COOKIE_REFRESH,
+  COOKIE_PLATFORM_JWT,
   parseSession,
 } from '../lib/cookies.js'
 import { signHs256Jwt } from '@baseworks/auth/jwt'
+import { iamEnabled, iamSync, iamEnsureOrg } from '../lib/iam.js'
 import { tokenPage } from '../pages/token.js'
-import type { DB } from '../db/client.js'
-import { schema } from '../db/client.js'
-import { eq } from 'drizzle-orm'
+
+/**
+ * Decode a JWT's payload segment. No signature check: the id_token was just
+ * fetched directly from the OIDC token endpoint over TLS during the code
+ * exchange, so it is already trusted at this point.
+ */
+function parseJwtPayload(jwt: string): Record<string, unknown> | null {
+  const seg = jwt.split('.')[1]
+  if (!seg) return null
+  try {
+    const json = Buffer.from(seg.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8')
+    return JSON.parse(json) as Record<string, unknown>
+  } catch {
+    return null
+  }
+}
 
 function getConfig(env: Record<string, string | undefined>) {
   return {
@@ -20,15 +33,18 @@ function getConfig(env: Record<string, string | undefined>) {
     clientId:     env['OIDC_CLIENT_ID'] ?? '',
     clientSecret: env['OIDC_CLIENT_SECRET'],
     scope:        (env['OIDC_SCOPE'] ?? 'openid profile email offline_access').split(' '),
+    appOrigin:    (env['APP_PUBLIC_URL'] ?? '').replace(/\/+$/, ''),
     appUrl:       `${(env['APP_PUBLIC_URL'] ?? '').replace(/\/+$/, '')}/v1/auth`,
+    // Exact post-logout URL to hand the IdP (must match what's registered on
+    // the OIDC app). Defaults to the app origin (no trailing slash).
+    postLogoutUrl: (env['OIDC_POST_LOGOUT_URL'] ?? '').replace(/\/+$/, ''),
     cookieDomain: env['OIDC_COOKIE_DOMAIN'],
     isProd:       env['NODE_ENV'] === 'production',
   }
 }
 
-export function oidcRouter(db: DB) {
-  const app      = new Hono()
-  const userRepo = createUserRepo(db, schema)
+export function oidcRouter() {
+  const app = new Hono()
 
   // GET /login
   app.get('/login', async (c) => {
@@ -96,40 +112,19 @@ export function oidcRouter(db: DB) {
     const issuer    = payload['iss'] as string | undefined
     const expiresAt = (payload['exp'] as number | undefined) ?? Math.floor(Date.now() / 1000) + (data.expires_in ?? 3600)
 
-    let platformUserId: string | undefined
+    // Resolve the platform identity. With IAM present, delegate identity + org
+    // to iam-service; without it, this is login-only — the OIDC subject IS the
+    // identity and there is no org (auth owns no user/org data — ADR-006/007).
+    let platformUserId = subject ?? ''
     let platformOrgId:  string | undefined
 
-    if (subject && email && issuer) {
-      const user = await userRepo.upsert({ subject, issuer, email, name, picture })
-      platformUserId = user.id
-
-      // Provision org for new users with no membership
-      const existing = await db
-        .select({ id: schema.orgMemberships.id, organizationId: schema.orgMemberships.organizationId })
-        .from(schema.orgMemberships)
-        .where(eq(schema.orgMemberships.userId, user.id))
-        .limit(1)
-
-      const createDefaultOrg = process.env['CREATE_DEFAULT_ORG'] === 'true'
-      if (createDefaultOrg && !existing.length) {
-        try {
-          const emailPrefix = email.includes('@') ? email.split('@')[0]! : email
-          const slug = emailPrefix.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'my-org'
-          const { organization } = await createOrganizationWithDefaults(db, schema, { name: emailPrefix, slug })
-          await db.insert(schema.orgMemberships).values({
-            id:             crypto.randomUUID(),
-            organizationId: organization.id,
-            userId:         user.id,
-            role:           'owner',
-            createdAt:      Math.floor(Date.now() / 1000),
-            updatedAt:      Math.floor(Date.now() / 1000),
-          })
-          platformOrgId = organization.id
-        } catch (err) {
-          console.error('[oidc] org provisioning failed:', err)
-        }
+    if (subject && email && issuer && iamEnabled()) {
+      const userId = await iamSync({ subject, issuer, email, name, picture })
+      if (userId) {
+        platformUserId = userId
+        platformOrgId  = await iamEnsureOrg(userId, email)
       } else {
-        platformOrgId = existing[0]?.organizationId
+        console.error('[oidc] IAM sync failed; falling back to OIDC subject')
       }
     }
 
@@ -140,6 +135,8 @@ export function oidcRouter(db: DB) {
       name:     name    ?? '',
       issuer:   issuer  ?? '',
       expiresAt,
+      userId:   platformUserId,
+      orgId:    platformOrgId,
     })
 
     const expires  = new Date(expiresAt * 1000).toUTCString()
@@ -151,9 +148,10 @@ export function oidcRouter(db: DB) {
     c.header('Set-Cookie', `${COOKIE_ID_TOKEN}=${data.id_token}; ${opts}; Expires=${expires}`, { append: true })
     c.header('Set-Cookie', `${COOKIE_SESSION}=${session}; ${opts}; Expires=${expires}`, { append: true })
 
-    // Platform JWT cookie — set on browser login so all services can read it directly.
-    // Same JWT the CLI gets via /v1/auth/token.
-    if (platformUserId && platformOrgId) {
+    // Platform JWT cookie — set on browser login so all services can read it
+    // directly (same JWT the CLI gets via /v1/auth/token). `org_id` is omitted in
+    // login-only mode; downstream apps that only need identity read `sub`.
+    if (platformUserId) {
       const jwtSecret = process.env['JWT_SECRET']
       if (jwtSecret) {
         const platformTtl = expiresAt - Math.floor(Date.now() / 1000)
@@ -173,8 +171,11 @@ export function oidcRouter(db: DB) {
       c.header('Set-Cookie', `${COOKIE_REFRESH}=${data.refresh_token}; ${opts}`, { append: true })
     }
 
-    const target = returnTo.startsWith('/') ? `${cfg.appUrl}${returnTo}` : returnTo
-    return c.redirect(target)
+    // returnTo is relative to the APP root (e.g. "/"), not to the auth service's
+    // own base path — a root-relative Location resolves against the app origin.
+    // Prefixing it with cfg.appUrl (which ends in /v1/auth) wrongly sent users
+    // to /v1/auth/ instead of /.
+    return c.redirect(returnTo)
   })
 
   // GET /session
@@ -193,32 +194,46 @@ export function oidcRouter(db: DB) {
   })
 
   // GET /logout
+  // Local logout by default: clears this app's cookies and returns to the app
+  // root — no dependency on the IdP. Full single-sign-out (also ending the
+  // Zitadel session) is opt-in with `?sso=1`, which requires the
+  // post_logout_redirect_uri to be registered on the OIDC app.
   app.get('/logout', async (c) => {
-    const cfg      = getConfig(process.env as Record<string, string | undefined>)
+    const cfg        = getConfig(process.env as Record<string, string | undefined>)
     const redirectTo = c.req.query('redirectTo') ?? '/'
-    const idToken  = getCookie(c, COOKIE_ID_TOKEN)
-    const domain   = cfg.cookieDomain ? `; Domain=${cfg.cookieDomain}` : ''
-    const clear    = `HttpOnly; Path=/; Max-Age=0${domain}`
+    const sso        = c.req.query('sso') === '1'
+    const idToken    = getCookie(c, COOKIE_ID_TOKEN)
+    const domain     = cfg.cookieDomain ? `; Domain=${cfg.cookieDomain}` : ''
+    const clear      = `HttpOnly; Path=/; Max-Age=0${domain}`
 
-    for (const name of ALL_OIDC_COOKIES) {
+    // Clear every cookie this service issues — including the platform JWT
+    // (`oidc_token`) that downstream services read to identify the user.
+    const cookieNames = [...new Set([...ALL_OIDC_COOKIES, COOKIE_PLATFORM_JWT, COOKIE_PKCE, COOKIE_RETURN_TO, 'oidc_token'])]
+    for (const name of cookieNames) {
       c.header('Set-Cookie', `${name}=; ${clear}`, { append: true })
     }
 
-    try {
-      const discovery = await fetch(`${cfg.issuer}/.well-known/openid-configuration`)
-        .then((r) => r.json()) as { end_session_endpoint?: string }
+    if (sso) {
+      try {
+        const discovery = await fetch(`${cfg.issuer}/.well-known/openid-configuration`)
+          .then((r) => r.json()) as { end_session_endpoint?: string }
+        if (discovery.end_session_endpoint) {
+          const endUrl = new URL(discovery.end_session_endpoint)
+          // Absolute URL that must EXACTLY match a registered post-logout URI.
+          // Precedence: ?redirectTo=<absolute> > OIDC_POST_LOGOUT_URL > app
+          // origin (all without a trailing slash so "…/" mismatches don't bite).
+          const post = redirectTo.startsWith('http')
+            ? redirectTo.replace(/\/+$/, '')
+            : (cfg.postLogoutUrl || cfg.appOrigin)
+          endUrl.searchParams.set('post_logout_redirect_uri', post)
+          if (idToken) endUrl.searchParams.set('id_token_hint', idToken)
+          return c.redirect(endUrl.toString())
+        }
+      } catch { /* fall through to local logout */ }
+    }
 
-      if (discovery.end_session_endpoint) {
-        const endUrl = new URL(discovery.end_session_endpoint)
-        const post   = redirectTo.startsWith('/') ? `${cfg.appUrl}${redirectTo}` : redirectTo
-        endUrl.searchParams.set('post_logout_redirect_uri', post)
-        if (idToken) endUrl.searchParams.set('id_token_hint', idToken)
-        return c.redirect(endUrl.toString())
-      }
-    } catch { /* fall through */ }
-
-    const target = redirectTo.startsWith('/') ? `${cfg.appUrl}${redirectTo}` : redirectTo
-    return c.redirect(target)
+    // Local logout: back to the app root (root-relative resolves to the origin).
+    return c.redirect(redirectTo)
   })
 
   // GET /token
@@ -231,8 +246,10 @@ export function oidcRouter(db: DB) {
 
     if (!session?.isAuthenticated) {
       if (!state) return c.json({ error: 'not_authenticated' }, 401)
-      // CLI flow: OIDC login'e yönlendir, state'i returnTo ile koru
-      const redirectTo = `/token?state=${state}`
+      // CLI flow: OIDC login'e yönlendir, state'i returnTo ile koru.
+      // returnTo must include the /v1/auth base path — Traefik strips it before
+      // this service sees the request, so a bare "/token" would 404 the app root.
+      const redirectTo = `/v1/auth/token?state=${state}`
       return c.redirect(`${base}/v1/auth/login?redirectTo=${encodeURIComponent(redirectTo)}`)
     }
 
@@ -241,26 +258,20 @@ export function oidcRouter(db: DB) {
       return c.html(tokenPage(state))
     }
 
-    // API flow: session var, state yok → direkt JWT döndür (web client)
+    // API flow: session var, state yok → direkt JWT döndür (web client).
+    // Identity + org were resolved at callback and stored in the session, so no
+    // database round-trip is needed here.
     const jwtSecret = process.env['JWT_SECRET']
     if (!jwtSecret) return c.json({ error: 'JWT_SECRET not configured' }, 500)
 
-    const user = await userRepo.findBySubject(session.issuer, session.subject)
-    if (!user) return c.json({ error: 'user_not_found' }, 404)
-
-    const membership = await db
-      .select({ organizationId: schema.orgMemberships.organizationId })
-      .from(schema.orgMemberships)
-      .where(eq(schema.orgMemberships.userId, user.id))
-      .limit(1)
-
-    const orgId   = membership[0]?.organizationId
+    const userId  = session.userId ?? session.subject
+    const orgId   = session.orgId
     const ttl     = Math.max(session.expiresAt - Math.floor(Date.now() / 1000), 60)
     const expires = new Date(session.expiresAt * 1000).toUTCString()
     const cfg     = getConfig(process.env as Record<string, string | undefined>)
 
     const token = signHs256Jwt(
-      { sub: user.id, org_id: orgId, type: 'human' },
+      { sub: userId, org_id: orgId, type: 'human' },
       jwtSecret,
       ttl,
     )
