@@ -3,8 +3,10 @@
 OIDC/PKCE login for Flect apps. It sits next to your app on the **same origin**
 (mounted at `/v1/auth`), runs the OAuth code+PKCE dance against your identity
 provider, and hands your app a signed **`oidc_token` cookie** it can verify to
-identify the user. It owns **no database** — identity and org data belong to
-[iam-service](../iam-service); auth either delegates to it or runs login-only.
+identify the user. It owns **no database** and deals in **identity only** — orgs
+and roles are an [org-service](../org-service) question, never carried in the
+token. Durable identity lives in [iam-service](../iam-service); auth delegates to
+it when present, or runs login-only.
 
 ## What it provides
 
@@ -13,8 +15,8 @@ identify the user. It owns **no database** — identity and org data belong to
   IdP single-sign-out with `?sso=1`).
 - **CLI device flow** — `/start` → `/poll/:state` → `/approve`, so a terminal can
   obtain a token by approving in the browser.
-- **Token minting** — `GET /token` returns the app JWT for a signed-in session;
-  `POST /token-for-org` upgrades an identity token to an org-scoped one (IAM mode).
+- **Token minting** — `GET /token` returns the identity JWT (`{ sub, type }`) for
+  a signed-in session.
 
 ## Two modes
 
@@ -22,14 +24,14 @@ auth discovers whether an IAM service is reachable and adapts:
 
 | | **login-only** (no IAM) | **IAM-backed** (`IAM_SERVICE_URL` set) |
 |---|---|---|
-| user store | none — the OIDC `subject` *is* the identity | iam-service (`/sync` upserts the user) |
-| org / RBAC | none | iam-service (`/me`, `/orgs`) — default org on first login when `CREATE_DEFAULT_ORG=true` |
-| `oidc_token` claims | `{ sub: <oidc subject>, type }` | `{ sub: <iam user id>, org_id, type }` |
-| needs a database | **no** | no (auth still owns none — IAM does) |
+| identity | the OIDC `subject` *is* the id | iam-service (`/sync` → a stable user id) |
+| orgs / roles | never here — resolve via org-service | never here — resolve via org-service |
+| `oidc_token` claims | `{ sub: <oidc subject>, type }` | `{ sub: <iam user id>, type }` |
+| needs a database | **no** | no (auth owns none) |
 
 `IAM_SERVICE_URL` is **injected by a Flect service binding**, never typed by a
 user. Absent it, auth is login-only — perfect for an app that just wants "who is
-this user" and no user management.
+this user".
 
 ## The token contract (what downstream apps read)
 
@@ -37,18 +39,18 @@ On login, auth sets cookie **`oidc_token`** — an HS256 JWT signed with the sha
 `JWT_SECRET`. Any app on the same origin verifies it with that secret and reads:
 
 - `sub` — the user id (stable per user). Scope your data by this.
-- `org_id` — present only in IAM mode. Omitted in login-only.
 - `type` — `"human"`.
 
+There is **no `org_id` claim** — an app that needs org context calls org-service.
 This is the single integration seam: **share `JWT_SECRET`, read `oidc_token.sub`.**
 
 ## Dependencies
 
 - An **OIDC identity provider** — `OIDC_ISSUER` + a **PKCE client** whose redirect
   URI is `${APP_PUBLIC_URL}/v1/auth/oidc/callback`.
-- **A cache** resolved via `@getflect/sdk` (`env.kv`, binding `CACHE` by default) —
+- **A cache** resolved via `@baseworks/sdk` (`env.kv('CACHE')` → raw `ioredis`) —
   the only persistence, holding transient PKCE/CLI state. No database.
-- Optionally **[iam-service](../iam-service)** for user + org management.
+- Optionally **[iam-service](../iam-service)** for durable identity (`/sync`).
 
 ## Configuration (env / `[vars]`)
 
@@ -62,9 +64,9 @@ This is the single integration seam: **share `JWT_SECRET`, read `oidc_token.sub`
 | `APP_PUBLIC_URL` | — | app origin; **injected by the platform**, overridable |
 | `OIDC_POST_LOGOUT_URL` | — | exact post-logout URI for `?sso=1` |
 | `AUTH_KV_BINDING` | — | cache binding name, default `CACHE` |
-| `IAM_SERVICE_URL` | — | **injected by a service binding**; enables IAM mode |
+| `IAM_SERVICE_URL` | — | **injected by a service binding**; enables IAM identity mode |
 | `IAM_BASE_PATH` | — | path prefix if IAM is reached through a gateway (e.g. `/v1/iam`) |
-| `CREATE_DEFAULT_ORG` | — | IAM mode: create a default org on first login |
+| `KV_CACHE_URL` | — | cache URL (`redis://…`); injected by the platform in prod |
 
 ## Deploy (as a sibling in a Flect app)
 
@@ -94,14 +96,14 @@ Mounted at root; through `expose="/v1/auth"` the gateway strips the prefix, so
 publicly they live under `/v1/auth/*`.
 
 - Browser: `GET /login`, `GET /oidc/callback`, `GET /session`, `GET /logout`, `GET /token`
-- CLI: `GET /start`, `GET /poll/:state`, `POST /approve`, `GET /token/done`, `POST /token-for-org`
+- CLI: `GET /start`, `GET /poll/:state`, `POST /approve`, `GET /token/done`
 - `GET /healthz` → `{ ok, service, iam }` (`iam` reflects the mode)
 
 ## Develop
 
 ```bash
 pnpm dev        # tsx watch, reads .env.local
-pnpm test       # vitest (login-only + IAM-mode, fetch-mocked)
+pnpm test       # 15 — routers over an in-memory KV
 pnpm build      # vitest run && tsup → dist/index.js
-just release-docker 0.4.0
+just release-docker 0.2.0
 ```

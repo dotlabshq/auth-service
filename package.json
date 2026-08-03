@@ -1,6 +1,6 @@
 {
   "name": "@dotlabshq/auth-service",
-  "version": "0.1.11",
+  "version": "0.2.2",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
@@ -12,14 +12,13 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
-    "@libsql/client": "^0.14.0",
     "ioredis": "5.10.1"
   },
   "devDependencies": {
-    "@baseworks/auth": "^0.2.3",
+    "@baseworks/auth": "^0.2.4",
     "@baseworks/core": "^0.2.1",
     "@baseworks/crypto": "^0.1.0",
-    "@getflect/sdk": "^0.1.0",
+    "@baseworks/sdk": "^0.1.1",
     "@hono/node-server": "^1.19.14",
     "@hono/zod-validator": "^0.4.3",
     "@types/node": "^22.20.0",

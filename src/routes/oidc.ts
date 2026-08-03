@@ -8,7 +8,7 @@ import {
   parseSession,
 } from '../lib/cookies.js'
 import { signHs256Jwt } from '@baseworks/auth/jwt'
-import { iamEnabled, iamSync, iamEnsureOrg } from '../lib/iam.js'
+import { iamEnabled, iamSync } from '../lib/iam.js'
 import { tokenPage } from '../pages/token.js'
 
 /**
@@ -112,17 +112,16 @@ export function oidcRouter() {
     const issuer    = payload['iss'] as string | undefined
     const expiresAt = (payload['exp'] as number | undefined) ?? Math.floor(Date.now() / 1000) + (data.expires_in ?? 3600)
 
-    // Resolve the platform identity. With IAM present, delegate identity + org
-    // to iam-service; without it, this is login-only — the OIDC subject IS the
-    // identity and there is no org (auth owns no user/org data — ADR-006/007).
+    // Resolve the platform identity. With IAM present, register the identity
+    // with iam-service (`/sync`) to get a stable user id; without it, this is
+    // login-only — the OIDC subject IS the identity. auth deals in NO org (a
+    // user has only memberships — an org-service question).
     let platformUserId = subject ?? ''
-    let platformOrgId:  string | undefined
 
     if (subject && email && issuer && iamEnabled()) {
       const userId = await iamSync({ subject, issuer, email, name, picture })
       if (userId) {
         platformUserId = userId
-        platformOrgId  = await iamEnsureOrg(userId, email)
       } else {
         console.error('[oidc] IAM sync failed; falling back to OIDC subject')
       }
@@ -136,7 +135,6 @@ export function oidcRouter() {
       issuer:   issuer  ?? '',
       expiresAt,
       userId:   platformUserId,
-      orgId:    platformOrgId,
     })
 
     const expires  = new Date(expiresAt * 1000).toUTCString()
@@ -149,17 +147,14 @@ export function oidcRouter() {
     c.header('Set-Cookie', `${COOKIE_SESSION}=${session}; ${opts}; Expires=${expires}`, { append: true })
 
     // Platform JWT cookie — set on browser login so all services can read it
-    // directly (same JWT the CLI gets via /v1/auth/token). `org_id` is omitted in
-    // login-only mode; downstream apps that only need identity read `sub`.
+    // directly (same JWT the CLI gets via /v1/auth/token). It carries identity
+    // only (`{ sub, type }`); an app that needs org context resolves membership
+    // via org-service.
     if (platformUserId) {
       const jwtSecret = process.env['JWT_SECRET']
       if (jwtSecret) {
         const platformTtl = expiresAt - Math.floor(Date.now() / 1000)
-        const platformJwt = signHs256Jwt(
-          { sub: platformUserId, org_id: platformOrgId, type: 'human' },
-          jwtSecret,
-          platformTtl,
-        )
+        const platformJwt = signHs256Jwt({ sub: platformUserId, type: 'human' }, jwtSecret, platformTtl)
         c.header('Set-Cookie', `oidc_token=${platformJwt}; ${opts}; Expires=${expires}`, { append: true })
       }
     }
@@ -259,22 +254,17 @@ export function oidcRouter() {
     }
 
     // API flow: session var, state yok → direkt JWT döndür (web client).
-    // Identity + org were resolved at callback and stored in the session, so no
-    // database round-trip is needed here.
+    // The identity was resolved at callback and stored in the session, so no
+    // round-trip is needed here.
     const jwtSecret = process.env['JWT_SECRET']
     if (!jwtSecret) return c.json({ error: 'JWT_SECRET not configured' }, 500)
 
     const userId  = session.userId ?? session.subject
-    const orgId   = session.orgId
     const ttl     = Math.max(session.expiresAt - Math.floor(Date.now() / 1000), 60)
     const expires = new Date(session.expiresAt * 1000).toUTCString()
     const cfg     = getConfig(process.env as Record<string, string | undefined>)
 
-    const token = signHs256Jwt(
-      { sub: userId, org_id: orgId, type: 'human' },
-      jwtSecret,
-      ttl,
-    )
+    const token = signHs256Jwt({ sub: userId, type: 'human' }, jwtSecret, ttl)
 
     const opts = cookieOpts(cfg.isProd, cfg.cookieDomain)
     c.header('Set-Cookie', `oidc_token=${token}; ${opts}; Expires=${expires}`, { append: true })

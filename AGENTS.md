@@ -6,10 +6,15 @@ project or changing this service. Companion: [README.md](./README.md).
 ## What this service is
 
 A stateless OIDC/PKCE login service that runs **as a sibling of your app on the
-same origin** (`/v1/auth`) and gives the app a verifiable `oidc_token` cookie.
-It owns **no database**. Identity + org data live in [iam-service](../iam-service);
-auth either delegates to IAM or runs **login-only** (the OIDC subject is the
-identity, no orgs). See ADR-006/007 in `../../docs/decisions`.
+same origin** (`/v1/auth`) and gives the app a verifiable `oidc_token` cookie
+carrying **identity only** (`{ sub, type }`). It owns **no database**.
+
+auth deals in identity, never orgs. A user has no org of their own — only
+memberships — so org context is an **org-service** question, resolved by the app
+when it needs one, never carried in the auth token. Durable identity lives in
+[iam-service](../iam-service): when reachable, auth registers the login there
+(`/sync`) to get a stable user id; otherwise it is **login-only** (the OIDC
+subject is the identity).
 
 ## The one rule
 
@@ -20,16 +25,16 @@ transient PKCE/CLI state.
 
 ## Architecture in one paragraph
 
-`createEnv()` (from `@getflect/sdk`) resolves one cache binding through the broker
-(`FLECT_TOKEN` + `FLECT_BROKER_URL`) — no substrate URLs, ADR-0004. On `/login`
-auth builds a PKCE auth URL; on `/oidc/callback` it exchanges the code, then
-**resolves the platform identity**: if `IAM_SERVICE_URL` is set it calls
-iam-service (`/sync` → user id, `/me`|`/orgs` → org), otherwise the OIDC `subject`
-is the identity. It stores `{ userId, orgId }` in the session cookie and sets the
-`oidc_token` JWT (HS256, `JWT_SECRET`). Downstream apps verify that JWT and read
-`sub`. Files: `src/routes/oidc.ts` (browser), `src/routes/cli.ts` (device flow),
-`src/lib/iam.ts` (IAM client + mode detection), `src/lib/cookies.ts` (cookie
-shapes), `src/index.ts` (wiring).
+`createEnv()` (from `@baseworks/sdk`) resolves one cache binding — `env.kv('CACHE')`
+returns a raw `ioredis` client for transient PKCE/CLI state (`KV_CACHE_URL`, no
+substrate URLs in config, ADR-0004). On `/login` auth builds a PKCE auth URL; on
+`/oidc/callback` it exchanges the code, then **resolves the platform identity**:
+if `IAM_SERVICE_URL` is set it calls iam-service (`/sync` → user id), otherwise the
+OIDC `subject` is the identity. It stores `{ userId }` in the session cookie and
+sets the `oidc_token` JWT (HS256, `JWT_SECRET`, `{ sub, type }`). Downstream apps
+verify that JWT and read `sub`. Files: `src/routes/oidc.ts` (browser),
+`src/routes/cli.ts` (device flow), `src/lib/iam.ts` (IAM `/sync` client + mode
+detection), `src/lib/cookies.ts` (cookie shapes), `src/index.ts` (wiring).
 
 ## How to integrate auth into a Flect app
 
@@ -72,27 +77,29 @@ cross-site cookie. Steps:
 That is the whole login-only integration. `examples/notes` in the flect repo is a
 working reference.
 
-### Turning on user + org management (IAM mode)
+### Registering identities in IAM (identity mode)
 
-Only when the app needs accounts/orgs/RBAC, not just "who is this user":
+Turn this on so logins map to a **stable, durable user id** (instead of the raw
+OIDC subject) — e.g. so the same person keeps one id across IdP changes, and
+other services can resolve them:
 
 1. Deploy [iam-service](../iam-service) reachable from auth.
 2. Bind it as a service so auth **discovers** it — the deployer injects
-   `IAM_SERVICE_URL` (auth appends `/sync`, `/me`, `/orgs`). If IAM is reached
-   through a gateway rather than a direct service binding, also set
-   `IAM_BASE_PATH=/v1/iam`.
-3. Optionally `CREATE_DEFAULT_ORG=true` to seed a default org on first login.
+   `IAM_SERVICE_URL` (auth calls `POST /sync`). If IAM is reached through a
+   gateway rather than a direct service binding, also set `IAM_BASE_PATH=/v1/iam`.
 
-With IAM present, `oidc_token` gains `org_id`, `/token-for-org` works, and
-`/healthz` reports `iam:true`. Nothing else in the app changes — it still just
-reads `sub` (and `org_id` if it cares).
+With IAM present, `oidc_token.sub` is the IAM user id and `/healthz` reports
+`iam:true`. The token shape is unchanged (identity only). **Orgs are never
+auth's job** — an app that needs org context calls org-service directly; there is
+no `org_id` claim and no `/token-for-org`.
 
 ## Contracts you must not break
 
 - **Shared-realm `JWT_SECRET`.** auth signs `oidc_token`; every consumer verifies
   with the same secret. Changing it invalidates all live sessions.
-- **`oidc_token` claim shape** — `{ sub, org_id?, type:"human" }`. `org_id` is
-  absent in login-only mode; consumers must treat it as optional.
+- **`oidc_token` claim shape** — `{ sub, type:"human" }`. Identity only; there is
+  no `org_id` claim. An app that needs org context resolves membership via
+  org-service — auth never scopes a token to an org.
 - **Same origin.** auth must be `expose`d under the app's origin (`/v1/auth`) so
   the cookie is same-site. A separate subdomain reintroduces the cross-site
   cookie problem this design avoids.
@@ -102,16 +109,17 @@ reads `sub` (and `org_id` if it cares).
 ## Depends on
 
 - An OIDC IdP (issuer + PKCE client).
-- `@getflect/sdk` — resolves the cache binding via the broker.
-- Optionally iam-service (`IAM_SERVICE_URL`).
+- `@baseworks/sdk` — `env.kv('CACHE')` resolves the cache (raw `ioredis`).
+- Optionally iam-service (`IAM_SERVICE_URL`) for durable identity.
 
 ## Build / test / ship
 
 ```bash
-pnpm test                    # 22 tests: CLI flow, /session, /token, token-for-org (login-only + IAM)
+pnpm test                    # 15 tests: CLI flow (/start /poll), /session, /token, login-only
 pnpm build                   # runs tests, then tsup → dist/index.js
 just release-docker <tag>    # build + push ghcr.io/dotlabshq/auth-service:<tag>
 ```
 
-Tests mock iam-service with `installIamMock` (see `src/__tests__/setup.ts`) — no
-real IAM needed to cover IAM mode.
+Tests wire the routers over an in-memory KV (`src/__tests__/setup.ts`) — no real
+cache or IAM needed. `/token` and CLI `/approve` mint from the session cookie, so
+IAM mode needs no mock (identity is already resolved into the session).

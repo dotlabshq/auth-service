@@ -1,12 +1,8 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import {
-  createTestApp, installIamMock,
-  makeIdentityToken, makeOrgToken, makeSessionCookie, SESSION_COOKIE_NAME,
-} from './setup.js'
+import { describe, it, expect, beforeEach } from 'vitest'
+import { createTestApp, makeSessionCookie, SESSION_COOKIE_NAME } from './setup.js'
 
 type App = Awaited<ReturnType<typeof createTestApp>>
 let app: App
-let restoreFetch: (() => void) | undefined
 
 async function json<T>(res: Response): Promise<T> {
   return res.json() as Promise<T>
@@ -14,11 +10,6 @@ async function json<T>(res: Response): Promise<T> {
 
 beforeEach(async () => {
   app = await createTestApp()
-})
-
-afterEach(() => {
-  restoreFetch?.()
-  restoreFetch = undefined
 })
 
 // ─── GET /start ───────────────────────────────────────────────────
@@ -82,68 +73,12 @@ describe('GET /poll/:state — check CLI auth status', () => {
   })
 })
 
-// ─── POST /token-for-org (IAM mode) ───────────────────────────────
+// ─── org-scoping is gone ──────────────────────────────────────────
 
-describe('POST /token-for-org — exchange identity JWT for org-scoped JWT (IAM mode)', () => {
-  beforeEach(async () => { app = await createTestApp({ iam: true }) })
-
-  it('returns org-scoped token for a valid member', async () => {
-    restoreFetch = installIamMock({ 'user-1': [{ id: 'org-1', role: 'admin' }] })
-    const res = await app.post('/token-for-org', { org_id: 'org-1' }, { token: makeIdentityToken('user-1') })
-    expect(res.status).toBe(200)
-    const body = await json<{ token: string; expires_in: number }>(res)
-    expect(typeof body.token).toBe('string')
-    expect(body.expires_in).toBe(14400)
-  })
-
-  it('returns 401 without Authorization header', async () => {
+describe('auth is login-only — no org endpoints', () => {
+  it('POST /token-for-org no longer exists (404, not 500)', async () => {
     const res = await app.post('/token-for-org', { org_id: 'org-1' })
-    expect(res.status).toBe(401)
-  })
-
-  it('returns 401 for invalid/expired token', async () => {
-    const res = await app.post('/token-for-org', { org_id: 'org-1' }, { token: 'not.a.jwt' })
-    expect(res.status).toBe(401)
-  })
-
-  it('returns 400 when token is already org-scoped', async () => {
-    const res = await app.post('/token-for-org', { org_id: 'org-1' }, { token: makeOrgToken('user-1', 'org-1') })
-    expect(res.status).toBe(400)
-    expect((await json<{ error: string }>(res)).error).toBe('already_org_scoped')
-  })
-
-  it('returns 403 when user is not a member', async () => {
-    restoreFetch = installIamMock({ 'user-1': [] })
-    const res = await app.post('/token-for-org', { org_id: 'org-1' }, { token: makeIdentityToken('user-1') })
-    expect(res.status).toBe(403)
-    expect((await json<{ error: string }>(res)).error).toBe('not_a_member')
-  })
-
-  it('returns 400 when org_id is missing from body', async () => {
-    const res = await app.post('/token-for-org', {}, { token: makeIdentityToken('user-1') })
-    expect(res.status).toBe(400)
-  })
-
-  it('issued token encodes the role IAM reports', async () => {
-    const { verifyHs256Jwt } = await import('@baseworks/auth/jwt')
-    restoreFetch = installIamMock({ 'user-1': [{ id: 'org-1', role: 'owner' }] })
-    const { token } = await json<{ token: string }>(
-      await app.post('/token-for-org', { org_id: 'org-1' }, { token: makeIdentityToken('user-1') }),
-    )
-    const claims = verifyHs256Jwt(token, process.env['JWT_SECRET']!)
-    expect(claims?.['role']).toBe('owner')
-    expect(claims?.['org_id']).toBe('org-1')
-    expect(claims?.['sub']).toBe('user-1')
-  })
-})
-
-// ─── POST /token-for-org (login-only mode) ────────────────────────
-
-describe('POST /token-for-org — login-only mode has no orgs', () => {
-  it('returns 400 org_selection_unavailable when IAM is absent', async () => {
-    const res = await app.post('/token-for-org', { org_id: 'org-1' }, { token: makeIdentityToken('user-1') })
-    expect(res.status).toBe(400)
-    expect((await json<{ error: string }>(res)).error).toBe('org_selection_unavailable')
+    expect(res.status).toBe(404)
   })
 })
 
@@ -203,20 +138,20 @@ describe('GET /token — mints a JWT from the session (no database)', () => {
     expect(claims?.['org_id']).toBeUndefined()
   })
 
-  it('IAM mode: token carries the resolved userId + orgId from the session', async () => {
+  it('IAM mode: token carries the resolved userId as sub, still no org_id', async () => {
     const { verifyHs256Jwt } = await import('@baseworks/auth/jwt')
     const cookie = makeSessionCookie({
       isAuthenticated: true,
       subject: 'sub-xyz', email: 'a@b.com', name: 'A', issuer: 'https://auth.test',
       expiresAt: Math.floor(Date.now() / 1000) + 3600,
-      userId: 'iam-user-1', orgId: 'iam-org-1',
+      userId: 'iam-user-1',
     })
     const res = await app.get('/token', { cookie: `${SESSION_COOKIE_NAME}=${cookie}` })
     expect(res.status).toBe(200)
     const { token } = await json<{ token: string }>(res)
     const claims = verifyHs256Jwt(token, process.env['JWT_SECRET']!)
     expect(claims?.['sub']).toBe('iam-user-1')
-    expect(claims?.['org_id']).toBe('iam-org-1')
+    expect(claims?.['org_id']).toBeUndefined()
   })
 
   it('returns 401 without a session', async () => {

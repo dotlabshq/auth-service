@@ -1,9 +1,10 @@
 import { serve } from '@hono/node-server'
 import { Hono } from 'hono'
 import { logger } from 'hono/logger'
-import { createEnv } from '@getflect/sdk'
+import { createEnv } from '@baseworks/sdk'
 import type { Redis } from 'ioredis'
-import { kvAdapter } from './db/client.js'
+import { kvAdapter, memoryKvAdapter } from './db/client.js'
+import type { KvClient } from './db/client.js'
 import { oidcRouter } from './routes/oidc.js'
 import { cliRouter } from './routes/cli.js'
 import { iamEnabled } from './lib/iam.js'
@@ -24,7 +25,21 @@ app.get('/healthz', (c) => c.json({ ok: true, service: 'auth-service', iam: iamE
 // binding) auth delegates to iam-service; otherwise it is login-only.
 const kvBinding = process.env.AUTH_KV_BINDING ?? 'CACHE'
 const env = createEnv()
-const kv = kvAdapter(await env.kv<Redis>(kvBinding))
+// A CACHE binding is preferred (durable, shared across instances). When none is
+// configured, auth degrades to an in-process cache rather than failing to boot:
+// its only state is short-lived OIDC/CLI login state, correct for a single
+// instance. Bind a `redis://` CACHE for multi-instance / restart-durable state.
+let kv: KvClient
+try {
+  kv = kvAdapter(await env.kv<Redis>(kvBinding))
+  console.log(`auth-service using CACHE binding "${kvBinding}"`)
+} catch (err) {
+  console.warn(
+    `auth-service: no usable CACHE binding "${kvBinding}" (${(err as Error).message}) — ` +
+      `falling back to in-memory KV (single-instance, non-durable)`,
+  )
+  kv = memoryKvAdapter()
+}
 
 app.route('/', oidcRouter())
 app.route('/', cliRouter(kv))

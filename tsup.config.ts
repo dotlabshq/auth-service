@@ -9,11 +9,16 @@ export default defineConfig({
     '@baseworks/auth',
     '@baseworks/crypto',
     '@baseworks/core',
-    '@getflect/sdk',
+    '@baseworks/sdk',
+    '@baseworks/foldbase',
+    '@baseworks/org',
+    '@baseworks/iam',
     '@hono/node-server',
     'hono',
     '@hono/zod-validator',
     'zod',
   ],
-  external: ['@libsql/client', 'ioredis', 'libsodium-wrappers'],
+  // ioredis is the raw KV driver @baseworks/sdk hands back (env.kv) — kept
+  // external and installed at runtime, not bundled.
+  external: ['ioredis', 'libsodium-wrappers'],
 })

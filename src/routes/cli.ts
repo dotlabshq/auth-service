@@ -1,14 +1,12 @@
 import { Hono } from 'hono'
-import { signHs256Jwt, verifyHs256Jwt } from '@baseworks/auth/jwt'
+import { signHs256Jwt } from '@baseworks/auth/jwt'
 import type { KvClient } from '../db/client.js'
 import { parseSession } from '../lib/cookies.js'
-import { iamEnabled, iamMembershipRole } from '../lib/iam.js'
 import { donePage } from '../pages/token.js'
 
 const KV_PFX          = 'auth:cli:'
 const TTL             = 600
 const IDENTITY_TTL    = 86400      // 24h
-const ORG_TOKEN_TTL   = 14400     // 4h
 
 function stateKey(state: string) { return `${KV_PFX}${state}` }
 
@@ -73,54 +71,18 @@ export function cliRouter(kv: KvClient) {
     const data = JSON.parse(raw) as CliStatus
     if (data.status !== 'pending') return c.json({ error: 'already_used' }, 409)
 
-    // Identity + org were resolved at OIDC callback and carried in the session
-    // (IAM user id + org in IAM mode; the OIDC subject in login-only mode) — no
-    // database lookup here.
+    // The identity was resolved at OIDC callback and carried in the session (the
+    // IAM user id in IAM mode; the OIDC subject in login-only mode).
     const userId = session.userId ?? subject
 
-    // identity JWT with org_id so downstream services can resolve memberships
-    const token = signHs256Jwt(
-      { sub: userId, org_id: session.orgId, type: 'human' },
-      jwtSecret(),
-      IDENTITY_TTL,
-    )
+    // Identity JWT — `{ sub, type }` only. An app that needs org context resolves
+    // membership via org-service; auth does not scope tokens to orgs.
+    const token = signHs256Jwt({ sub: userId, type: 'human' }, jwtSecret(), IDENTITY_TTL)
 
     await kv.set(stateKey(state), JSON.stringify({ status: 'done', token }), { ttl: 60 })
 
     const base = (process.env['APP_PUBLIC_URL'] ?? '').replace(/\/+$/, '')
     return c.redirect(`${base}/v1/auth/token/done`)
-  })
-
-  // POST /token-for-org — exchange identity JWT for org-scoped JWT
-  app.post('/token-for-org', async (c) => {
-    const bearer = c.req.header('authorization')?.replace(/^Bearer\s+/i, '')
-    if (!bearer) return c.json({ error: 'missing_token' }, 401)
-
-    const claims = verifyHs256Jwt(bearer, jwtSecret())
-    if (!claims || claims['type'] !== 'human') return c.json({ error: 'invalid_token' }, 401)
-    // identity token must not already be org-scoped
-    if (claims['org_id']) return c.json({ error: 'already_org_scoped' }, 400)
-
-    const { org_id } = await c.req.json() as { org_id?: string }
-    if (!org_id) return c.json({ error: 'org_id_required' }, 400)
-
-    const userId = claims['sub'] as string
-
-    // Org selection only exists when IAM is present — login-only auth has no
-    // orgs to scope to.
-    if (!iamEnabled()) return c.json({ error: 'org_selection_unavailable' }, 400)
-
-    // Verify membership through IAM (deny if the user has no role in the org).
-    const role = await iamMembershipRole(userId, org_id)
-    if (!role) return c.json({ error: 'not_a_member' }, 403)
-
-    const orgToken = signHs256Jwt(
-      { sub: userId, org_id, role, type: 'human' },
-      jwtSecret(),
-      ORG_TOKEN_TTL,
-    )
-
-    return c.json({ token: orgToken, expires_in: ORG_TOKEN_TTL })
   })
 
   return app
