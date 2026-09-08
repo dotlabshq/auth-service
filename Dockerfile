@@ -1,8 +1,12 @@
 FROM node:22-alpine AS builder
 WORKDIR /app
 
-COPY package.json ./
-RUN npm install
+# package-lock.json da kopyalanır ve npm ci kullanılır: lock'suz `npm install` her
+# build'de registry'yi yeniden çözüyordu; 2026-09-08'de npm 10.9 bir @baseworks sürümünde
+# 'Cannot read properties of null (reading edgesOut)' ile çöktü ve imaj üretilemedi.
+# 0.2.2 aylardır cache'ten geçtiği için görünmemişti.
+COPY package.json package-lock.json ./
+RUN npm ci
 
 COPY tsconfig.json ./
 COPY tsup.config.ts ./
