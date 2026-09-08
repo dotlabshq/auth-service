@@ -41,16 +41,29 @@ export interface OidcSession {
 export function parseSession(c: Context): OidcSession | null {
   const raw = getCookie(c, COOKIE_SESSION)
   if (!raw) return null
+  const parsed = decodeSession(raw)
+  if (!parsed || !parsed.isAuthenticated) return null
+  return parsed
+}
+
+/**
+ * Session cookie codec: JSON → UTF-8 → base64url.
+ *
+ * NOT btoa()/atob(): those are Latin-1 only and throw InvalidCharacterError on any
+ * code point above U+00FF. The session carries the IdP's display name, so a user
+ * called "İsmail" (U+0130) got a 500 on /oidc/callback while everyone with an ASCII
+ * name logged in fine (prod, 2026-09-08). Buffer with 'base64url' is UTF-8 safe and
+ * already strips padding; ASCII payloads encode to the identical string, so cookies
+ * issued by the old code keep working.
+ */
+export function encodeSession(session: OidcSession): string {
+  return Buffer.from(JSON.stringify(session), 'utf8').toString('base64url')
+}
+
+export function decodeSession(raw: string): OidcSession | null {
   try {
-    const json = atob(raw.replace(/-/g, '+').replace(/_/g, '/'))
-    const parsed = JSON.parse(json) as OidcSession
-    if (!parsed.isAuthenticated) return null
-    return parsed
+    return JSON.parse(Buffer.from(raw, 'base64url').toString('utf8')) as OidcSession
   } catch {
     return null
   }
-}
-
-export function encodeSession(session: OidcSession): string {
-  return btoa(JSON.stringify(session)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 }

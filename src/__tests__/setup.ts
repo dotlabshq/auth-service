@@ -16,7 +16,7 @@ export class InMemoryKv {
 
 /** Encode a session cookie value exactly as encodeSession() does in cookies.ts. */
 export function makeSessionCookie(data: Record<string, unknown>) {
-  return btoa(JSON.stringify(data)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+  return Buffer.from(JSON.stringify(data), 'utf8').toString('base64url')
 }
 
 export async function createTestApp() {

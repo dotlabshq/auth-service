@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { createTestApp, makeSessionCookie, SESSION_COOKIE_NAME } from './setup.js'
+import { encodeSession, decodeSession } from '../lib/cookies.js'
 
 type App = Awaited<ReturnType<typeof createTestApp>>
 let app: App
@@ -83,6 +84,35 @@ describe('auth is login-only — no org endpoints', () => {
 })
 
 // ─── GET /session ─────────────────────────────────────────────────
+
+describe('session cookie codec — non-Latin-1 names', () => {
+  const session = {
+    isAuthenticated: true, subject: 'sub-1', email: 'ismail@example.com',
+    // İ (U+0130) is outside Latin-1: btoa() threw InvalidCharacterError here and
+    // /oidc/callback answered 500 for this user while ASCII names logged in fine.
+    name: 'İsmail Demirbilek', issuer: 'https://idp.example', expiresAt: 4102444800,
+  }
+
+  it('round-trips a name with İ/ş/ğ', () => {
+    const raw = encodeSession(session)
+    expect(raw).toMatch(/^[A-Za-z0-9_-]+$/)          // base64url, no padding
+    expect(decodeSession(raw)).toEqual(session)
+  })
+
+  it('/session returns the decoded name intact', async () => {
+    const res = await app.get('/session', { cookie: `${SESSION_COOKIE_NAME}=${encodeSession(session)}` })
+    expect(res.status).toBe(200)
+    expect((await json<{ name: string }>(res)).name).toBe('İsmail Demirbilek')
+  })
+
+  it('still reads cookies issued by the old btoa() codec (ASCII payloads)', () => {
+    const ascii = { isAuthenticated: true, subject: 's', email: 'a@b.c', name: 'Ada', issuer: 'i', expiresAt: 1 }
+    const legacy = btoa(JSON.stringify(ascii)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+    expect(legacy).toBe(encodeSession(ascii as never))  // byte-identical for ASCII
+    expect(decodeSession(legacy)).toEqual(ascii)
+  })
+})
+
 
 describe('GET /session — browser session check', () => {
   it('returns 401 when no session cookie', async () => {

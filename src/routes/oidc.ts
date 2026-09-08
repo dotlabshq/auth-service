@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import { getCookie } from 'hono/cookie'
 import { generatePkce, buildOidcAuthUrl } from '@baseworks/auth/pkce'
 import {
-  cookieOpts, encodeSession, ALL_OIDC_COOKIES,
+  cookieOpts, encodeSession, decodeSession, ALL_OIDC_COOKIES,
   COOKIE_PKCE, COOKIE_RETURN_TO, COOKIE_ID_TOKEN, COOKIE_SESSION, COOKIE_ACCESS, COOKIE_REFRESH,
   COOKIE_PLATFORM_JWT,
   parseSession,
@@ -177,15 +177,9 @@ export function oidcRouter() {
   app.get('/session', (c) => {
     const raw = getCookie(c, COOKIE_SESSION)
     if (!raw) return c.json({ isAuthenticated: false }, 401)
-    try {
-      const pad    = raw.replace(/-/g, '+').replace(/_/g, '/')
-      const rem    = pad.length % 4
-      const parsed = JSON.parse(atob(rem ? pad + '='.repeat(4 - rem) : pad)) as { isAuthenticated: boolean }
-      if (!parsed.isAuthenticated) return c.json({ isAuthenticated: false }, 401)
-      return c.json(parsed)
-    } catch {
-      return c.json({ isAuthenticated: false }, 401)
-    }
+    const parsed = decodeSession(raw)
+    if (!parsed || !parsed.isAuthenticated) return c.json({ isAuthenticated: false }, 401)
+    return c.json(parsed)
   })
 
   // GET /logout
