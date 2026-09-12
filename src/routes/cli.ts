@@ -1,5 +1,5 @@
 import { Hono } from 'hono'
-import { signHs256Jwt } from '@baseworks/auth/jwt'
+import { mintIdentityToken } from '../lib/mint.js'
 import type { KvClient } from '../db/client.js'
 import { parseSession } from '../lib/cookies.js'
 import { donePage } from '../pages/token.js'
@@ -13,12 +13,6 @@ function stateKey(state: string) { return `${KV_PFX}${state}` }
 function randomState(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(16))
   return Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('')
-}
-
-function jwtSecret(): string {
-  const s = process.env['JWT_SECRET']
-  if (!s) throw new Error('JWT_SECRET not set')
-  return s
 }
 
 type CliStatus = { status: 'pending' } | { status: 'done'; token: string }
@@ -75,9 +69,10 @@ export function cliRouter(kv: KvClient) {
     // IAM user id in IAM mode; the OIDC subject in login-only mode).
     const userId = session.userId ?? subject
 
-    // Identity JWT — `{ sub, type }` only. An app that needs org context resolves
+    // Identity JWT — identity only. An app that needs org context resolves
     // membership via org-service; auth does not scope tokens to orgs.
-    const token = signHs256Jwt({ sub: userId, type: 'human' }, jwtSecret(), IDENTITY_TTL)
+    const token = await mintIdentityToken({ sub: userId, type: 'human', expiresInSeconds: IDENTITY_TTL })
+    if (!token) return c.json({ error: 'realm has no signing key configured' }, 500)
 
     await kv.set(stateKey(state), JSON.stringify({ status: 'done', token }), { ttl: 60 })
 

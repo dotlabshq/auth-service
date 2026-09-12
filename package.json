@@ -1,6 +1,6 @@
 {
   "name": "@dotlabshq/auth-service",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
@@ -9,14 +9,15 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "dev": "tsx watch --env-file=.env.local src/index.ts",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "keygen": "tsx src/keygen.ts"
   },
   "dependencies": {
     "ioredis": "5.10.1"
   },
   "devDependencies": {
-    "@baseworks/auth": "^0.2.4",
-    "@baseworks/core": "^0.2.1",
+    "@baseworks/auth": "workspace:*",
+    "@baseworks/core": "workspace:*",
     "@baseworks/crypto": "^0.1.0",
     "@baseworks/sdk": "^0.1.1",
     "@hono/node-server": "^1.19.14",

@@ -7,7 +7,7 @@ import {
   COOKIE_PLATFORM_JWT,
   parseSession,
 } from '../lib/cookies.js'
-import { signHs256Jwt } from '@baseworks/auth/jwt'
+import { mintIdentityToken } from '../lib/mint.js'
 import { iamEnabled, iamSync } from '../lib/iam.js'
 import { tokenPage } from '../pages/token.js'
 
@@ -151,10 +151,11 @@ export function oidcRouter() {
     // only (`{ sub, type }`); an app that needs org context resolves membership
     // via org-service.
     if (platformUserId) {
-      const jwtSecret = process.env['JWT_SECRET']
-      if (jwtSecret) {
-        const platformTtl = expiresAt - Math.floor(Date.now() / 1000)
-        const platformJwt = signHs256Jwt({ sub: platformUserId, type: 'human' }, jwtSecret, platformTtl)
+      const platformTtl = expiresAt - Math.floor(Date.now() / 1000)
+      const platformJwt = await mintIdentityToken({
+        sub: platformUserId, type: 'human', expiresInSeconds: platformTtl,
+      })
+      if (platformJwt) {
         c.header('Set-Cookie', `oidc_token=${platformJwt}; ${opts}; Expires=${expires}`, { append: true })
       }
     }
@@ -250,15 +251,13 @@ export function oidcRouter() {
     // API flow: session var, state yok → direkt JWT döndür (web client).
     // The identity was resolved at callback and stored in the session, so no
     // round-trip is needed here.
-    const jwtSecret = process.env['JWT_SECRET']
-    if (!jwtSecret) return c.json({ error: 'JWT_SECRET not configured' }, 500)
-
     const userId  = session.userId ?? session.subject
     const ttl     = Math.max(session.expiresAt - Math.floor(Date.now() / 1000), 60)
     const expires = new Date(session.expiresAt * 1000).toUTCString()
     const cfg     = getConfig(process.env as Record<string, string | undefined>)
 
-    const token = signHs256Jwt({ sub: userId, type: 'human' }, jwtSecret, ttl)
+    const token = await mintIdentityToken({ sub: userId, type: 'human', expiresInSeconds: ttl })
+    if (!token) return c.json({ error: 'realm has no signing key configured' }, 500)
 
     const opts = cookieOpts(cfg.isProd, cfg.cookieDomain)
     c.header('Set-Cookie', `oidc_token=${token}; ${opts}; Expires=${expires}`, { append: true })
