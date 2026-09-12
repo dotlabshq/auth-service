@@ -7,6 +7,7 @@ import { kvAdapter, memoryKvAdapter } from './db/client.js'
 import type { KvClient } from './db/client.js'
 import { oidcRouter } from './routes/oidc.js'
 import { cliRouter } from './routes/cli.js'
+import { tokensRouter } from './routes/tokens.js'
 import { iamEnabled } from './lib/iam.js'
 import { realm } from './lib/realm.js'
 
@@ -59,6 +60,7 @@ try {
 
 app.route('/', oidcRouter())
 app.route('/', cliRouter(kv))
+app.route('/', tokensRouter())
 
 app.onError((err, c) => {
   console.error(err)
