@@ -127,3 +127,52 @@ describe('without a signing key', () => {
     expect(((await res.json()) as JSONWebKeySet).keys).toEqual([])
   })
 })
+
+describe('service manifest', () => {
+  async function manifestApp() {
+    const { serviceManifest } = await import('@baseworks/core/service')
+    const { realm } = await import('../lib/realm.js')
+    const a = new Hono()
+    a.get('/.well-known/service', async (c) => {
+      const r = await realm()
+      return c.json(
+        serviceManifest({
+          name: 'auth',
+          version: '0.3.0',
+          api_version: '1.0',
+          openapi_url: '/openapi.yaml',
+          capabilities: [
+            'oidc-login', 'cli-device-flow', 'service-token', 'token-exchange',
+            ...(r.jwks ? ['jwks'] : []),
+          ],
+        }),
+      )
+    })
+    return a
+  }
+
+  it('names the service and its contract, and needs no credentials', async () => {
+    process.env['AUTH_SIGNING_KEY'] = await signingKeyEnv()
+    resetRealm()
+
+    const res = await (await manifestApp()).request('/.well-known/service')
+    const body = (await res.json()) as { name: string; api_version: string; capabilities: string[] }
+
+    expect(res.status).toBe(200)
+    expect(body.name).toBe('auth')
+    expect(body.api_version).toBe('1.0')
+    expect(body.capabilities).toContain('jwks')
+  })
+
+  it('drops the jwks capability when the realm cannot sign, so consumers can branch', async () => {
+    delete process.env['AUTH_SIGNING_KEY']
+    process.env['JWT_SECRET'] = JWT_SECRET
+    resetRealm()
+
+    const res = await (await manifestApp()).request('/.well-known/service')
+    const body = (await res.json()) as { capabilities: string[] }
+
+    expect(body.capabilities).not.toContain('jwks')
+    expect(body.capabilities).toContain('cli-device-flow')
+  })
+})

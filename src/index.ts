@@ -10,10 +10,49 @@ import { cliRouter } from './routes/cli.js'
 import { tokensRouter } from './routes/tokens.js'
 import { iamEnabled } from './lib/iam.js'
 import { realm } from './lib/realm.js'
+import { serviceManifest } from '@baseworks/core/service'
+import { readFileSync } from 'node:fs'
+
+// Read once at startup: the release is a build-time fact, and re-reading it per
+// request would turn a manifest fetch into disk I/O.
+const VERSION = (() => {
+  try {
+    return (JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as
+      { version?: string }).version ?? '0.0.0'
+  } catch {
+    return '0.0.0'
+  }
+})()
 
 const app = new Hono()
 app.use('*', logger())
 app.get('/healthz', (c) => c.json({ ok: true, service: 'auth-service', iam: iamEnabled() }))
+
+// What this service is and what contract it speaks. Unauthenticated: it carries
+// no secrets, and its readers include the gateway and a CLI that has not signed
+// in yet (ADR-042 §8 in the zone9 repo).
+app.get('/.well-known/service', async (c) => {
+  const r = await realm()
+  return c.json(
+    serviceManifest({
+      name: 'auth',
+      version: VERSION,
+      // Bumped only when the HTTP surface breaks callers, not on every release.
+      api_version: '1.0',
+      openapi_url: '/openapi.yaml',
+      capabilities: [
+        'oidc-login',
+        'cli-device-flow',
+        'service-token',
+        'token-exchange',
+        // Consumers branch on this: with no signing key the realm still issues
+        // HS256 and there is nothing at the JWKS endpoint to verify against.
+        ...(r.jwks ? ['jwks'] : []),
+        ...(iamEnabled() ? ['iam-sync'] : []),
+      ],
+    }),
+  )
+})
 
 // The realm's public keys. Unauthenticated on purpose: every verifier in the
 // realm — and the gateway — reads this, and it contains only public material.
