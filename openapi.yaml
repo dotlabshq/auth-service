@@ -1,0 +1,364 @@
+openapi: 3.1.0
+info:
+  title: auth-service
+  version: "1.0"
+  description: |
+    The realm's sign-in gate and its only token issuer.
+
+    **Mounting.** Routes live at the service root. Behind a gateway the realm is
+    reached at `/v1/auth/...`, with that prefix stripped before the request
+    arrives — so `/start` here is `https://<host>/v1/auth/start` in public.
+
+    **What a token is.** An identity token and nothing more: `iss`, `aud`, `sub`,
+    `iat`, `exp`, `jti`, `type`. Organisation and role are deliberately absent,
+    because membership changes while a token lives and a token carrying a role
+    goes stale and lies. A service that needs org context asks the org service.
+
+    **Why only this service signs.** With ES256 the private key never leaves
+    auth-service; everyone else verifies with the public key from
+    `/.well-known/jwks.json` and cannot mint anything. The shared HMAC secret
+    this replaces gave every holder the power to issue tokens, including tokens
+    claiming to be another user. There is deliberately no endpoint that mints a
+    token for an arbitrary subject.
+
+servers:
+  - url: https://auth.example.com/v1/auth
+    description: Behind a gateway
+  - url: http://127.0.0.1:3003
+    description: Direct, for local development
+
+tags:
+  - name: discovery
+    description: Unauthenticated; readers include the gateway and signed-out clients
+  - name: browser
+    description: The OIDC sign-in flow a browser walks through
+  - name: cli
+    description: Browser-approved sign-in for a command line
+  - name: tokens
+    description: Tokens that are not a browser login
+
+paths:
+  /healthz:
+    get:
+      tags: [discovery]
+      summary: Liveness
+      security: []
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  service: { type: string }
+                  iam: { type: boolean, description: Whether an iam-service is reachable }
+
+  /.well-known/service:
+    get:
+      tags: [discovery]
+      summary: What this service is and what contract it speaks
+      description: |
+        `capabilities` lists `jwks` only when the realm has a signing key. Without
+        one the realm still issues HS256 and there is nothing to verify against,
+        so a consumer can tell the two states apart rather than fetching an empty
+        key set and guessing.
+      security: []
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ServiceManifest" }
+
+  /.well-known/jwks.json:
+    get:
+      tags: [discovery]
+      summary: The realm's public signing keys
+      description: |
+        Every verifier in the realm reads this. Contains public material only.
+
+        During a rotation both the new and the retired key are listed, for longer
+        than a token lives, so tokens signed by either keep verifying.
+
+        A realm with no signing key answers an empty set rather than 404: a 404
+        risks being cached as if it were a key set.
+      security: []
+      responses:
+        "200":
+          description: A JWKS, possibly empty
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  keys:
+                    type: array
+                    items: { $ref: "#/components/schemas/Jwk" }
+
+  /login:
+    get:
+      tags: [browser]
+      summary: Begin OIDC sign-in
+      security: []
+      parameters:
+        - name: returnTo
+          in: query
+          schema: { type: string }
+          description: App-relative path to return to after sign-in
+      responses:
+        "302": { description: Redirect to the identity provider }
+
+  /oidc/callback:
+    get:
+      tags: [browser]
+      summary: Identity provider redirect target
+      description: |
+        Exchanges the code, resolves the platform identity (registering it with
+        iam-service when one is configured), and sets the session cookies plus
+        the realm identity token.
+      security: []
+      responses:
+        "302": { description: Redirect back into the app }
+
+  /session:
+    get:
+      tags: [browser]
+      summary: The current browser session, if any
+      security: []
+      responses:
+        "200":
+          description: Session state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  isAuthenticated: { type: boolean }
+                  subject: { type: string }
+                  email: { type: string }
+                  name: { type: string }
+
+  /logout:
+    get:
+      tags: [browser]
+      summary: Clear this app's cookies
+      description: |
+        Local by default. Note that an already-issued token stays valid until it
+        expires — the realm has no revocation list today, which is what `jti` in
+        every token is there to make possible later.
+      security: []
+      responses:
+        "302": { description: Redirect }
+
+  /token:
+    get:
+      tags: [browser, cli]
+      summary: Hand the session's identity token to the caller, or show the CLI approval page
+      description: |
+        With `state` present this renders the approval page for a waiting CLI.
+        Without it, a signed-in browser receives the identity token as JSON.
+      security: []
+      parameters:
+        - name: state
+          in: query
+          schema: { type: string }
+          description: Present for the CLI flow; omit for the browser flow
+      responses:
+        "200":
+          description: The token, or the approval page
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenResponse" }
+            text/html:
+              schema: { type: string }
+        "401": { description: No session }
+        "500": { description: The realm has no way to sign }
+
+  /start:
+    get:
+      tags: [cli]
+      summary: Begin a browser-approved CLI sign-in
+      description: |
+        Returns a `state` handle and the URL the user must approve. Poll
+        `/poll/{state}` until it reports `done`.
+
+        The handle lives `expires_in` seconds. A client should poll until exactly
+        that moment and no longer: giving up sooner reports failure while the
+        link still works.
+      security: []
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [state, url, expires_in]
+                properties:
+                  state: { type: string }
+                  url: { type: string, description: The page the user approves }
+                  expires_in: { type: integer, description: Seconds }
+
+  /poll/{state}:
+    get:
+      tags: [cli]
+      summary: Wait for the user to approve
+      description: |
+        `pending` until approval, then `done` with the token exactly once — the
+        handle is consumed. An unknown handle and an expired one both answer
+        `expired`; from the client's side they mean the same thing.
+      security: []
+      parameters:
+        - name: state
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, enum: [pending, done, expired] }
+                  token: { type: string, description: Present only with `done` }
+
+  /approve:
+    post:
+      tags: [cli]
+      summary: Approve a waiting CLI sign-in
+      description: Submitted by the approval page from a signed-in browser.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [state]
+              properties:
+                state: { type: string }
+      responses:
+        "302": { description: Redirect to the done page }
+        "401": { description: Not signed in }
+        "404": { description: Unknown or expired handle }
+        "409": { description: Already used }
+
+  /service-token:
+    post:
+      tags: [tokens]
+      summary: A token for the calling service itself
+      description: |
+        Client credentials. The subject is the authenticated client and cannot be
+        chosen, so a leaked service secret speaks for that service alone — the
+        difference from the shared signing secret, which spoke for everyone.
+
+        An unknown client and a wrong secret get the same answer; telling them
+        apart would turn this into a list of which services exist.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [client_id, client_secret]
+              properties:
+                client_id: { type: string }
+                client_secret: { type: string }
+                expires_in:
+                  type: integer
+                  description: Seconds; capped at 3600
+      responses:
+        "200":
+          description: Issued
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenResponse" }
+        "401": { description: invalid_client }
+        "503": { description: No service clients configured }
+
+  /exchange:
+    post:
+      tags: [tokens]
+      summary: Narrow your own token
+      description: |
+        Returns a short-lived `assistant` token for the **same** subject, limited
+        to one organisation and an optional scope. Intended for assistants, CI
+        jobs and anything else that should not carry a full sign-in.
+
+        Only a `human` token may be exchanged. Allowing a service or an already
+        narrowed token to exchange would build chains that outlive and outreach
+        the sign-in they came from.
+
+        `org_id` is a restriction, not a grant: it says "only this org", and the
+        consuming service still checks membership, because auth knows nothing
+        about organisations.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                org_id: { type: string }
+                scope: { type: string }
+                expires_in:
+                  type: integer
+                  description: Seconds; capped at 3600
+      responses:
+        "200":
+          description: Issued
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenResponse" }
+        "401": { description: Missing or invalid token }
+        "403": { description: The presented token is not a human token }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    TokenResponse:
+      type: object
+      required: [token, token_type, expires_in]
+      properties:
+        token: { type: string }
+        token_type: { type: string, enum: [bearer] }
+        expires_in: { type: integer, description: Seconds }
+
+    ServiceManifest:
+      type: object
+      required: [name, version, api_version]
+      properties:
+        name: { type: string, example: auth }
+        version: { type: string, description: Release of this deployment }
+        api_version:
+          type: string
+          description: Contract version; moves only when the HTTP surface breaks callers
+        openapi_url: { type: string }
+        capabilities:
+          type: array
+          items: { type: string }
+
+    Jwk:
+      type: object
+      description: Public key only; the private half is never published.
+      properties:
+        kty: { type: string, example: EC }
+        crv: { type: string, example: P-256 }
+        alg: { type: string, example: ES256 }
+        use: { type: string, example: sig }
+        kid: { type: string, description: RFC 7638 thumbprint, derived from the key }
+        x: { type: string }
+        y: { type: string }
+
+security:
+  - bearerAuth: []

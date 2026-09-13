@@ -1,109 +1,135 @@
 # auth-service
 
-OIDC/PKCE login for Flect apps. It sits next to your app on the **same origin**
-(mounted at `/v1/auth`), runs the OAuth code+PKCE dance against your identity
-provider, and hands your app a signed **`oidc_token` cookie** it can verify to
-identify the user. It owns **no database** and deals in **identity only** — orgs
-and roles are an [org-service](../org-service) question, never carried in the
-token. Durable identity lives in [iam-service](../iam-service); auth delegates to
-it when present, or runs login-only.
+The realm's sign-in gate and its **only token issuer**.
 
-## What it provides
+A realm is one deployment of this plane: one auth-service, one signing key pair,
+and the services that trust it. A token issued here is accepted by every service
+in that realm and by no other.
 
-- **Browser SSO** — `/login` → IdP → `/oidc/callback`, sets a same-site
-  `oidc_token` (HS256 JWT) plus session cookies; `/logout` clears them (optional
-  IdP single-sign-out with `?sso=1`).
-- **CLI device flow** — `/start` → `/poll/:state` → `/approve`, so a terminal can
-  obtain a token by approving in the browser.
-- **Token minting** — `GET /token` returns the identity JWT (`{ sub, type }`) for
-  a signed-in session.
+## What a token is
 
-## Two modes
+An identity token and nothing more:
 
-auth discovers whether an IAM service is reachable and adapts:
-
-| | **login-only** (no IAM) | **IAM-backed** (`IAM_SERVICE_URL` set) |
-|---|---|---|
-| identity | the OIDC `subject` *is* the id | iam-service (`/sync` → a stable user id) |
-| orgs / roles | never here — resolve via org-service | never here — resolve via org-service |
-| `oidc_token` claims | `{ sub: <oidc subject>, type }` | `{ sub: <iam user id>, type }` |
-| needs a database | **no** | no (auth owns none) |
-
-`IAM_SERVICE_URL` is **injected by a Flect service binding**, never typed by a
-user. Absent it, auth is login-only — perfect for an app that just wants "who is
-this user".
-
-## The token contract (what downstream apps read)
-
-On login, auth sets cookie **`oidc_token`** — an HS256 JWT signed with the shared
-`JWT_SECRET`. Any app on the same origin verifies it with that secret and reads:
-
-- `sub` — the user id (stable per user). Scope your data by this.
-- `type` — `"human"`.
-
-There is **no `org_id` claim** — an app that needs org context calls org-service.
-This is the single integration seam: **share `JWT_SECRET`, read `oidc_token.sub`.**
-
-## Dependencies
-
-- An **OIDC identity provider** — `OIDC_ISSUER` + a **PKCE client** whose redirect
-  URI is `${APP_PUBLIC_URL}/v1/auth/oidc/callback`.
-- **A cache** resolved via `@baseworks/sdk` (`env.kv('CACHE')` → raw `ioredis`) —
-  the only persistence, holding transient PKCE/CLI state. No database.
-- Optionally **[iam-service](../iam-service)** for durable identity (`/sync`).
-
-## Configuration (env / `[vars]`)
-
-| var | required | purpose |
-|---|---|---|
-| `JWT_SECRET` | ✅ | signs/verifies the shared-realm JWT (`oidc_token`) |
-| `OIDC_ISSUER` | ✅ | IdP base URL |
-| `OIDC_CLIENT_ID` | ✅ | PKCE client id |
-| `OIDC_CLIENT_SECRET` | — | set only for a confidential client (PKCE public if absent) |
-| `OIDC_SCOPE` | — | default `openid profile email offline_access` |
-| `APP_PUBLIC_URL` | — | app origin; **injected by the platform**, overridable |
-| `OIDC_POST_LOGOUT_URL` | — | exact post-logout URI for `?sso=1` |
-| `AUTH_KV_BINDING` | — | cache binding name, default `CACHE` |
-| `IAM_SERVICE_URL` | — | **injected by a service binding**; enables IAM identity mode |
-| `IAM_BASE_PATH` | — | path prefix if IAM is reached through a gateway (e.g. `/v1/iam`) |
-| `KV_CACHE_URL` | — | cache URL (`redis://…`); injected by the platform in prod |
-
-## Deploy (as a sibling in a Flect app)
-
-```toml
-[[apps]]
-name   = "auth"
-image  = "ghcr.io/dotlabshq/auth-service:0.4.0"
-port   = 3000
-expose = "/v1/auth"          # same origin as the app that owns the domain
-
-[vars]
-JWT_SECRET     = "<shared realm secret>"
-OIDC_ISSUER    = "https://your-idp.example"
-OIDC_CLIENT_ID = "<pkce client id>"
-APP_PUBLIC_URL = "https://<app>-<shortid>.up.flect.run"
-
-# auth shares the app's cache (binding CACHE) — no store of its own to declare.
+```
+iss  the realm's issuer URL        sub  the platform user id
+aud  the realm's name              iat / exp
+jti  unique, so revocation is possible later
+type human | service | assistant
 ```
 
-See [AGENTS.md](./AGENTS.md) for the full integration playbook (PKCE setup,
-turning on IAM, the cookie contract) and [examples/notes](../flect/examples/notes)
-for a live login-only app.
+**Organisation and role are deliberately absent.** Membership changes while a
+token lives, so a token carrying a role goes stale and lies. A service that needs
+org context asks the org service and caches the answer briefly.
+
+## Why only this service signs
+
+With ES256 the private key never leaves auth-service. Everyone else verifies
+using the public key from `/.well-known/jwks.json`, and therefore cannot mint
+anything.
+
+The shared HMAC secret this replaces gave every holder the power to *issue*
+tokens, not just check them — and that power was being used: a product API in
+this plane minted `{ sub: <another user>, type: 'user' }` to act on that user's
+behalf. There is deliberately no endpoint here that mints a token for an
+arbitrary subject. What replaced those uses is narrower:
+
+| Need | Endpoint | Limit |
+|---|---|---|
+| A service acting as itself | `POST /service-token` | Subject is the authenticated client; it cannot be chosen |
+| An assistant or CI job | `POST /exchange` | Same subject as the caller, one org, at most an hour |
+| Acting as another user | — | Not offered. Grant the *service* the permission instead |
+
+## Configuration
+
+| Variable | Meaning |
+|---|---|
+| `AUTH_SIGNING_KEY` | EC P-256 private key, PKCS#8 PEM **or base64 of it** |
+| `AUTH_SIGNING_KID` | Override the derived key id; rarely needed |
+| `AUTH_RETIRED_PUBLIC_KEYS` | SPKI PEMs still published during a rotation |
+| `AUTH_ISSUER` | Expected `iss`; defaults to `APP_PUBLIC_URL` |
+| `AUTH_AUDIENCE` | Realm name; defaults to the issuer's hostname |
+| `AUTH_SERVICE_CLIENTS` | `name:secret,name:secret` for `/service-token` |
+| `JWT_SECRET` | **Legacy.** HS256, accepted while set — see below |
+| `OIDC_*`, `APP_PUBLIC_URL`, `IAM_SERVICE_URL`, `KV_CACHE_URL` | Unchanged |
+
+Base64 is accepted for key material because environment variables, Kubernetes
+Secrets and CI variables all mangle the newlines a PEM needs.
+
+### Generating a key
+
+```
+pnpm --filter @dotlabshq/auth-service keygen
+```
+
+Prints a fresh pair to stdout and never to a file: a private key written to disk
+gets committed, backed up and copied. The key id is derived from the key itself
+(RFC 7638 thumbprint), so it is not something to keep in step by hand.
+
+### Rotating
+
+1. Generate a new pair.
+2. Put the **old public** key in `AUTH_RETIRED_PUBLIC_KEYS` and the new private
+   key in `AUTH_SIGNING_KEY`. Both are now published; new tokens use the new key.
+3. After the longest token lifetime has passed, drop the retired key.
+
+### Migrating off the shared secret
+
+Order matters, and each step is safe on its own:
+
+1. Deploy this service **without** `AUTH_SIGNING_KEY`. It keeps issuing HS256
+   and behaves exactly as before.
+2. Upgrade verifiers to `@baseworks/auth` 0.3.0 and give them `AUTH_JWKS_URI`.
+   They accept both algorithms while `JWT_SECRET` is set.
+3. Set `AUTH_SIGNING_KEY` here. New tokens are ES256; old ones keep verifying
+   until they expire.
+4. Move anything that was *minting* with the secret onto `/service-token`.
+5. Remove `JWT_SECRET` everywhere. Only then is the issuing power actually gone.
 
 ## Endpoints
 
-Mounted at root; through `expose="/v1/auth"` the gateway strips the prefix, so
-publicly they live under `/v1/auth/*`.
+Full contract: [`openapi.yaml`](./openapi.yaml), also served at `/openapi.yaml`.
 
-- Browser: `GET /login`, `GET /oidc/callback`, `GET /session`, `GET /logout`, `GET /token`
-- CLI: `GET /start`, `GET /poll/:state`, `POST /approve`, `GET /token/done`
-- `GET /healthz` → `{ ok, service, iam }` (`iam` reflects the mode)
+Routes live at the service root. Behind a gateway the realm is reached at
+`/v1/auth/...`, with that prefix stripped before the request arrives.
 
-## Develop
+| | |
+|---|---|
+| `GET /healthz` · `GET /.well-known/service` · `GET /.well-known/jwks.json` | Discovery, unauthenticated |
+| `GET /login` · `/oidc/callback` · `/session` · `/logout` · `/token` | Browser sign-in |
+| `GET /start` · `GET /poll/:state` · `POST /approve` | CLI device flow |
+| `POST /service-token` · `POST /exchange` | Tokens that are not a browser login |
 
-```bash
-pnpm dev        # tsx watch, reads .env.local
-pnpm test       # 15 — routers over an in-memory KV
-pnpm build      # vitest run && tsup → dist/index.js
-just release-docker 0.2.0
+### The CLI flow, and the one mistake clients make
+
+`/start` returns a handle and the URL to approve; poll `/poll/{state}` until it
+answers `done`. Poll until exactly `expires_in` and no longer — a shorter client
+timeout reports failure while the link still works. An unknown handle and an
+expired one both answer `expired`, because from the client's side they mean the
+same thing: nobody approved in time.
+
+## Known gaps
+
+- **No revocation.** A token is valid until it expires; `/logout` clears cookies
+  only. Every token carries a `jti` so a deny list can be added without a format
+  change.
+- **Login state lives in the cache.** With no `KV_CACHE_URL` the service falls
+  back to an in-process cache, which is correct for one replica and wrong for
+  several: `/start` and `/poll` would land on different pods and the flow would
+  break. Bind a Redis cache before scaling out.
+
+## Development
+
 ```
+pnpm dev     # tsx watch, reads .env.local
+pnpm test    # vitest
+pnpm build   # tsup
+```
+
+Build the image from the monorepo root:
+
+```
+podman build -f projects/auth-service/Dockerfile.workspace -t auth-service:<tag> .
+```
+
+The standalone `Dockerfile` is deprecated: `npm ci` cannot resolve the
+`workspace:*` dependencies this service now uses.

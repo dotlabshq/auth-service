@@ -1,3 +1,9 @@
+# DEPRECATED — use Dockerfile.workspace, built from the monorepo root.
+#
+# auth-service now depends on workspace packages (@baseworks/auth, @baseworks/core)
+# and `npm ci` cannot resolve `workspace:*`. This file is kept for reference only;
+# it builds a release whose @baseworks dependencies all came from the registry.
+#
 FROM node:22-alpine AS builder
 WORKDIR /app
 

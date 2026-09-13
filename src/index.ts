@@ -28,6 +28,17 @@ const app = new Hono()
 app.use('*', logger())
 app.get('/healthz', (c) => c.json({ ok: true, service: 'auth-service', iam: iamEnabled() }))
 
+// The contract itself. Served from the repo file so the document and the code
+// ship together and cannot drift apart between releases.
+app.get('/openapi.yaml', (c) => {
+  try {
+    const spec = readFileSync(new URL('../openapi.yaml', import.meta.url), 'utf8')
+    return c.body(spec, 200, { 'content-type': 'application/yaml; charset=utf-8' })
+  } catch {
+    return c.json({ error: 'spec not bundled with this build' }, 404)
+  }
+})
+
 // What this service is and what contract it speaks. Unauthenticated: it carries
 // no secrets, and its readers include the gateway and a CLI that has not signed
 // in yet (ADR-042 §8 in the zone9 repo).
