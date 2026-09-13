@@ -39,6 +39,94 @@ arbitrary subject. What replaced those uses is narrower:
 | An assistant or CI job | `POST /exchange` | Same subject as the caller, one org, at most an hour |
 | Acting as another user | — | Not offered. Grant the *service* the permission instead |
 
+## Using it from your app
+
+Add `@baseworks/auth` and let the middleware do the work. Your code never names
+a key or an algorithm:
+
+```ts
+import { requireAuth } from '@baseworks/auth/hono'
+
+app.use('*', requireAuth)
+app.get('/things', (c) => {
+  const { userId, tokenType } = c.get('auth')
+})
+```
+
+```
+AUTH_JWKS_URI=https://auth.example.com/v1/auth/.well-known/jwks.json
+AUTH_ISSUER=https://auth.example.com
+AUTH_AUDIENCE=example-realm
+```
+
+Set the issuer and audience in production. Without them, a token from any realm
+whose key set you happen to fetch will verify.
+
+Needing org context? Do **not** look for it in the token — it is not there, on
+purpose. Ask the org service and cache the answer briefly.
+
+### Signing in from a CLI
+
+```ts
+import { addAuthCommands } from '@baseworks/auth/cli'
+import { createConfigManager } from '@baseworks/config'
+
+const config = createConfigManager<{ token?: string }>('mycli', {}, {
+  format: 'toml',
+  scope: 'global',   // ~/.mycli/config.toml, 0600 — never inside a working tree
+})
+
+addAuthCommands(program, {
+  cliName: 'mycli',
+  authBase: () => 'https://auth.example.com/v1/auth',
+  onToken:  (token) => config.patch({ token }),
+  onLogout: () => config.patch({ token: undefined }),
+  getToken: () => config.load().token,
+  tokenOrigin: () => config.writePath,
+})
+```
+
+```
+$ mycli login
+  Approve this sign-in in your browser:
+  https://auth.example.com/v1/auth/token?state=dd6c62cb…
+  Waiting for approval — the link is valid for 10m…
+✓ Logged in.
+
+$ mycli auth status
+  user        01a05840-b6aa-7421-80d7-6eb192551584
+  token type  human
+  expires     2026-09-13 14:33 UTC (in 23h 57m)
+```
+
+### Getting a token for a service
+
+For cron jobs, queue workers and anything else acting on its own behalf:
+
+```bash
+curl -sX POST https://auth.example.com/v1/auth/service-token \
+  -H 'content-type: application/json' \
+  -d '{"client_id":"billing","client_secret":"'"$BILLING_AUTH_SECRET"'"}'
+```
+
+The subject is the authenticated client and cannot be chosen. If you find
+yourself wanting a token for a *user* from a backend, that is the thing this
+service deliberately does not do — give the service its own identity and grant
+that identity the permission it needs.
+
+### Narrowing a token for an assistant or a CI job
+
+```bash
+curl -sX POST https://auth.example.com/v1/auth/exchange \
+  -H "authorization: Bearer $USER_TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"org_id":"org_1","scope":"read","expires_in":600}'
+```
+
+Same subject, one org, at most an hour. `org_id` is a restriction, not a grant:
+the receiving service still checks membership, because auth knows nothing about
+organisations.
+
 ## Configuration
 
 | Variable | Meaning |
