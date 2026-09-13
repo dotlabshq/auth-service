@@ -38,6 +38,25 @@ export interface OidcSession {
   userId?: string
 }
 
+/**
+ * The session as an HTTP body: `snake_case`, per ADR-043.
+ *
+ * The cookie itself keeps its own shape on purpose. It is storage, not a
+ * contract, and renaming its keys would invalidate every session cookie already
+ * in a browser — signing everyone out to tidy up a field name.
+ */
+export function serializeSession(s: OidcSession): Record<string, unknown> {
+  return {
+    is_authenticated: s.isAuthenticated,
+    subject: s.subject,
+    email: s.email,
+    name: s.name,
+    issuer: s.issuer,
+    expires_at: s.expiresAt,
+    ...(s.userId ? { user_id: s.userId } : {}),
+  }
+}
+
 export function parseSession(c: Context): OidcSession | null {
   const raw = getCookie(c, COOKIE_SESSION)
   if (!raw) return null

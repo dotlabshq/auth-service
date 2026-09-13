@@ -195,6 +195,15 @@ timeout reports failure while the link still works. An unknown handle and an
 expired one both answer `expired`, because from the client's side they mean the
 same thing: nobody approved in time.
 
+## Field naming
+
+Bodies are `snake_case` (ADR-043), which the OAuth2 fields — `token_type`,
+`expires_in`, `client_id` — already were; the plane had been mixing the two.
+
+The **session cookie** keeps its own shape. It is storage, not a contract, and
+renaming its keys would invalidate every session already in a browser — signing
+everyone out to tidy up a field name.
+
 ## Known gaps
 
 - **No revocation.** A token is valid until it expires; `/logout` clears cookies

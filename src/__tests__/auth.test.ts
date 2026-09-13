@@ -118,7 +118,7 @@ describe('GET /session — browser session check', () => {
   it('returns 401 when no session cookie', async () => {
     const res = await app.get('/session')
     expect(res.status).toBe(401)
-    expect((await json<{ isAuthenticated: boolean }>(res)).isAuthenticated).toBe(false)
+    expect((await json<{ is_authenticated: boolean }>(res)).is_authenticated).toBe(false)
   })
 
   it('returns 200 with authenticated session cookie', async () => {
@@ -132,9 +132,18 @@ describe('GET /session — browser session check', () => {
     })
     const res = await app.get('/session', { cookie: `${SESSION_COOKIE_NAME}=${cookie}` })
     expect(res.status).toBe(200)
-    const body = await json<{ isAuthenticated: boolean; email: string }>(res)
-    expect(body.isAuthenticated).toBe(true)
-    expect(body.email).toBe('user@test.com')
+
+    // The body is snake_case (ADR-043); the cookie keeps its own shape, so
+    // sessions already in browsers stay valid.
+    const body = await json<Record<string, unknown>>(res)
+    expect(body).toMatchObject({
+      is_authenticated: true,
+      email: 'user@test.com',
+      subject: 'sub-001',
+    })
+    expect(body['expires_at']).toBeTypeOf('number')
+    expect(body).not.toHaveProperty('isAuthenticated')
+    expect(body).not.toHaveProperty('expiresAt')
   })
 
   it('returns 401 for invalid/malformed session cookie', async () => {

@@ -9,6 +9,9 @@ info:
     reached at `/v1/auth/...`, with that prefix stripped before the request
     arrives — so `/start` here is `https://<host>/v1/auth/start` in public.
 
+    **Field names are `snake_case`** (ADR-043), which the OAuth2 fields here —
+    `token_type`, `expires_in`, `client_id` — already were.
+
     **What a token is.** An identity token and nothing more: `iss`, `aud`, `sub`,
     `iat`, `exp`, `jti`, `type`. Organisation and role are deliberately absent,
     because membership changes while a token lives and a token carrying a role
@@ -135,10 +138,13 @@ paths:
               schema:
                 type: object
                 properties:
-                  isAuthenticated: { type: boolean }
+                  is_authenticated: { type: boolean }
                   subject: { type: string }
                   email: { type: string }
                   name: { type: string }
+                  issuer: { type: string }
+                  expires_at: { type: integer }
+                  user_id: { type: string }
 
   /logout:
     get:
