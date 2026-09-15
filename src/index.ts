@@ -90,6 +90,19 @@ app.get('/.well-known/jwks.json', async (c) => {
 //
 // Identity/org: when IAM is reachable (IAM_SERVICE_URL, injected by a service
 // binding) auth delegates to iam-service; otherwise it is login-only.
+/** Give a promise a deadline. A cache that cannot answer a ping in 2s is down. */
+async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      p,
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`no answer in ${ms}ms`)), ms) }),
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 const kvBinding = process.env.AUTH_KV_BINDING ?? 'CACHE'
 const env = createEnv()
 // A CACHE binding is preferred (durable, shared across instances). When none is
@@ -98,7 +111,14 @@ const env = createEnv()
 // instance. Bind a `redis://` CACHE for multi-instance / restart-durable state.
 let kv: KvClient
 try {
-  kv = kvAdapter(await env.kv<Redis>(kvBinding))
+  const redis = await env.kv<Redis>(kvBinding)
+  // Resolving the binding only builds a client: ioredis connects lazily, so a
+  // cache that is configured but not running is still "resolved" here and only
+  // fails on the first write — 28 seconds later, as a 500 on `/start`, with the
+  // reason nowhere near the request. One ping at boot turns that into a warning
+  // on the line above, before anyone has tried to sign in.
+  await withTimeout(redis.ping(), 2000)
+  kv = kvAdapter(redis)
   console.log(`auth-service using CACHE binding "${kvBinding}"`)
 } catch (err) {
   console.warn(

@@ -138,6 +138,7 @@ organisations.
 | `AUTH_AUDIENCE` | Realm name; defaults to the issuer's hostname |
 | `AUTH_SERVICE_CLIENTS` | `name:secret,name:secret` for `/service-token` |
 | `JWT_SECRET` | **Legacy.** HS256, accepted while set — see below |
+| `AUTH_CLI_APPROVE_URL` | Where `/start` sends a person to approve a CLI sign-in; defaults to this service's own page |
 | `OIDC_*`, `APP_PUBLIC_URL`, `IAM_SERVICE_URL`, `KV_CACHE_URL` | Unchanged |
 
 Base64 is accepted for key material because environment variables, Kubernetes
