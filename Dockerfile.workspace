@@ -12,12 +12,33 @@ WORKDIR /repo
 ENV PNPM_CONFIG_DANGEROUSLY_ALLOW_ALL_BUILDS=true
 
 COPY pnpm-workspace.yaml package.json ./
-COPY packages ./packages
+
+# Only the workspace members this service actually needs. Copying all of
+# packages/ pulls in unrelated ones whose own dependencies (next, sharp) add
+# minutes to every build — and drags in @baseworks/foldbase, which lives under
+# projects/ and would then have to be copied to satisfy a package nothing here
+# uses.
+COPY packages/tsconfig ./packages/tsconfig
+COPY packages/baseworks-core ./packages/baseworks-core
+COPY packages/baseworks-cli ./packages/baseworks-cli
+COPY packages/baseworks-config ./packages/baseworks-config
+COPY packages/baseworks-auth ./packages/baseworks-auth
+COPY packages/baseworks-sdk ./packages/baseworks-sdk
+# @baseworks/sdk depends on the foldbase, iam and org clients, which live under
+# projects/. Their package.json files alone are not enough — pnpm resolves the
+# workspace member, and the build consumes its dist.
+COPY projects/foldbase/package.json ./projects/foldbase/package.json
+COPY projects/foldbase/clients/ts ./projects/foldbase/clients/ts
+COPY projects/iam-service/package.json ./projects/iam-service/package.json
+COPY projects/iam-service/clients/ts ./projects/iam-service/clients/ts
+COPY projects/org-service/package.json ./projects/org-service/package.json
+COPY projects/org-service/clients/ts ./projects/org-service/clients/ts
+
 COPY projects/auth-service ./projects/auth-service
 
 RUN pnpm install --no-frozen-lockfile
-# The libraries auth imports are consumed from dist, so they must be built.
-RUN pnpm -r --filter './packages/*' build
+# Libraries and the foldbase client are consumed from dist, so both are built.
+RUN pnpm -r --filter './packages/*' --filter './projects/*/clients/ts' build
 
 FROM node:22-alpine AS runner
 RUN corepack enable && adduser -S -u 1001 svc
