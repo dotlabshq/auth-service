@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { createTestApp, makeSessionCookie, SESSION_COOKIE_NAME } from './setup.js'
+import { createTestApp, makeForgedSessionCookie, makeSessionCookie, SESSION_COOKIE_NAME } from './setup.js'
 import { encodeSession, decodeSession } from '../lib/cookies.js'
 
 type App = Awaited<ReturnType<typeof createTestApp>>
@@ -95,7 +95,7 @@ describe('session cookie codec — non-Latin-1 names', () => {
 
   it('round-trips a name with İ/ş/ğ', () => {
     const raw = encodeSession(session)
-    expect(raw).toMatch(/^[A-Za-z0-9_-]+$/)          // base64url, no padding
+    expect(raw).toMatch(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/)   // base64url payload + tag, no padding
     expect(decodeSession(raw)).toEqual(session)
   })
 
@@ -105,11 +105,17 @@ describe('session cookie codec — non-Latin-1 names', () => {
     expect((await json<{ name: string }>(res)).name).toBe('İsmail Demirbilek')
   })
 
-  it('still reads cookies issued by the old btoa() codec (ASCII payloads)', () => {
+  it('refuses a cookie with no tag — including one from the old untagged codec', () => {
     const ascii = { isAuthenticated: true, subject: 's', email: 'a@b.c', name: 'Ada', issuer: 'i', expiresAt: 1 }
-    const legacy = btoa(JSON.stringify(ascii)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
-    expect(legacy).toBe(encodeSession(ascii as never))  // byte-identical for ASCII
-    expect(decodeSession(legacy)).toEqual(ascii)
+    const untagged = Buffer.from(JSON.stringify(ascii), 'utf8').toString('base64url')
+    expect(decodeSession(untagged)).toBeNull()
+  })
+
+  it('refuses a cookie whose payload was edited under a valid tag', () => {
+    const raw = encodeSession(session)
+    const forged = { ...session, subject: 'someone-else' }
+    const swapped = `${Buffer.from(JSON.stringify(forged), 'utf8').toString('base64url')}.${raw.split('.')[1]}`
+    expect(decodeSession(swapped)).toBeNull()
   })
 })
 
@@ -155,6 +161,77 @@ describe('GET /session — browser session check', () => {
     const cookie = makeSessionCookie({ isAuthenticated: false })
     const res = await app.get('/session', { cookie: `${SESSION_COOKIE_NAME}=${cookie}` })
     expect(res.status).toBe(401)
+  })
+})
+
+// ─── approving from a console screen ──────────────────────────────
+
+describe('POST /approve answers its caller in kind', () => {
+  const session = {
+    isAuthenticated: true, subject: 'sub-1', userId: 'usr_1',
+    email: 'a@b.test', name: 'A', issuer: 'https://idp.test',
+    expiresAt: Math.floor(Date.now() / 1000) + 3600,
+  }
+
+  it('JSON in, JSON out — and the token goes to the CLI, not to the page', async () => {
+    const { state } = await json<{ state: string }>(await app.get('/start'))
+    const res = await app.post('/approve', { state }, { cookie: `${SESSION_COOKIE_NAME}=${makeSessionCookie(session)}` })
+
+    // A redirect here would hand a fetch() a page of HTML instead of an answer.
+    expect(res.status).toBe(200)
+    const body = await json<Record<string, unknown>>(res)
+    expect(body).toEqual({ ok: true })
+    expect(body).not.toHaveProperty('token')
+
+    // The waiting CLI is the one that collects it.
+    const poll = await json<{ status: string; token?: string }>(await app.get(`/poll/${state}`))
+    expect(poll.status).toBe('done')
+    expect(poll.token).toBeTypeOf('string')
+  })
+
+  it('a form post still gets the redirect a browser needs', async () => {
+    const { state } = await json<{ state: string }>(await app.get('/start'))
+    const res = await app.postForm('/approve', `state=${state}`, {
+      cookie: `${SESSION_COOKIE_NAME}=${makeSessionCookie(session)}`,
+    })
+    expect(res.status).toBe(302)
+  })
+})
+
+// ─── the session cookie must be unforgeable ───────────────────────
+//
+// `/token` and `/approve` mint a realm identity token for whoever the cookie
+// names. While the cookie was plain base64, anyone who could reach this service
+// could name any user and be issued a token as them — no password, no identity
+// provider. These tests are the guard on that.
+
+describe('a hand-built session cookie is not a session', () => {
+  const claim = {
+    isAuthenticated: true,
+    subject: 'victim', email: 'victim@example.com', name: 'Victim',
+    issuer: 'https://auth.test',
+    expiresAt: Math.floor(Date.now() / 1000) + 3600,
+    userId: 'victim',
+  }
+
+  it('GET /session refuses it', async () => {
+    const res = await app.get('/session', { cookie: `${SESSION_COOKIE_NAME}=${makeForgedSessionCookie(claim)}` })
+    expect(res.status).toBe(401)
+  })
+
+  it('GET /token mints nothing from it', async () => {
+    const res = await app.get('/token', { cookie: `${SESSION_COOKIE_NAME}=${makeForgedSessionCookie(claim)}` })
+    expect(res.status).toBe(401)
+  })
+
+  it('POST /approve does not hand a CLI a token for the named user', async () => {
+    const { state } = await json<{ state: string }>(await app.get('/start'))
+    const res = await app.post('/approve', { state }, { cookie: `${SESSION_COOKIE_NAME}=${makeForgedSessionCookie(claim)}` })
+    expect(res.status).toBe(401)
+
+    // And the waiting CLI is still waiting, not holding someone else's identity.
+    const poll = await json<{ status: string }>(await app.get(`/poll/${state}`))
+    expect(poll.status).toBe('pending')
   })
 })
 

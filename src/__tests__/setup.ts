@@ -1,8 +1,12 @@
 import { Hono } from 'hono'
+import { encodeSession } from '../lib/cookies.js'
 import { cliRouter } from '../routes/cli.js'
 import { oidcRouter } from '../routes/oidc.js'
 
 export const JWT_SECRET = 'test-secret-32-chars-long-enough!'
+// Set at import time: a test may build a cookie before createTestApp() runs,
+// and the cookie's tag has to be keyed the same way the service will key it.
+process.env['JWT_SECRET'] = JWT_SECRET
 export const SESSION_COOKIE_NAME = 'oidc_session'
 
 // Simple in-memory KV that satisfies the KvClient interface used by cliRouter.
@@ -14,8 +18,18 @@ export class InMemoryKv {
   _raw() { return this.store }
 }
 
-/** Encode a session cookie value exactly as encodeSession() does in cookies.ts. */
+/**
+ * A session cookie the service will accept: payload plus the HMAC tag, keyed
+ * the way cookies.ts derives it from JWT_SECRET. A test that hand-rolled the
+ * base64 would now be testing forgery, which is a different test (and there is
+ * one).
+ */
 export function makeSessionCookie(data: Record<string, unknown>) {
+  return encodeSession(data as never, { JWT_SECRET } as NodeJS.ProcessEnv)
+}
+
+/** The same payload with no tag — what an attacker can build unaided. */
+export function makeForgedSessionCookie(data: Record<string, unknown>) {
   return Buffer.from(JSON.stringify(data), 'utf8').toString('base64url')
 }
 
@@ -32,6 +46,8 @@ export async function createTestApp() {
 
   function req(method: string, path: string, o: {
     body?: unknown
+    /** Sent verbatim — for a form post, whose body is not JSON. */
+    rawBody?: string
     token?: string
     cookie?: string
     contentType?: string
@@ -41,7 +57,12 @@ export async function createTestApp() {
     if (o.body !== undefined) headers['Content-Type'] = o.contentType ?? 'application/json'
     if (o.cookie) headers['Cookie'] = o.cookie
     const init: RequestInit = { method, headers }
-    if (o.body !== undefined) init.body = JSON.stringify(o.body)
+    if (o.rawBody !== undefined) {
+      headers['Content-Type'] = o.contentType ?? 'application/x-www-form-urlencoded'
+      init.body = o.rawBody
+    } else if (o.body !== undefined) {
+      init.body = JSON.stringify(o.body)
+    }
     return app.fetch(new Request(`http://localhost${path}`, init))
   }
 
@@ -50,5 +71,7 @@ export async function createTestApp() {
     get:  (path: string, o?: Parameters<typeof req>[2]) => req('GET', path, o),
     post: (path: string, body: unknown, o?: Omit<Parameters<typeof req>[2], 'body'>) =>
       req('POST', path, { body, ...o }),
+    postForm: (path: string, form: string, o?: Omit<Parameters<typeof req>[2], 'body' | 'rawBody'>) =>
+      req('POST', path, { rawBody: form, ...o }),
   }
 }
