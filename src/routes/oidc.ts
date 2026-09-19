@@ -10,6 +10,7 @@ import {
 import { mintIdentityToken } from '../lib/mint.js'
 import { iamEnabled, iamSync } from '../lib/iam.js'
 import { tokenPage } from '../pages/token.js'
+import { returnOrigins, safeReturnTo } from '../lib/return-to.js'
 
 /**
  * Decode a JWT's payload segment. No signature check: the id_token was just
@@ -39,6 +40,9 @@ function getConfig(env: Record<string, string | undefined>) {
     // the OIDC app). Defaults to the app origin (no trailing slash).
     postLogoutUrl: (env['OIDC_POST_LOGOUT_URL'] ?? '').replace(/\/+$/, ''),
     cookieDomain: env['OIDC_COOKIE_DOMAIN'],
+    // Where a sign-in or sign-out may send the browser afterwards. Anything
+    // else lands on `/` — see lib/return-to.ts.
+    returnOrigins: returnOrigins(env),
     isProd:       env['NODE_ENV'] === 'production',
   }
 }
@@ -49,7 +53,9 @@ export function oidcRouter() {
   // GET /login
   app.get('/login', async (c) => {
     const cfg        = getConfig(process.env as Record<string, string | undefined>)
-    const redirectTo = c.req.query('redirectTo') ?? '/'
+    // Checked here rather than on the way back, so a poisoned value is never
+    // stored in a cookie in the first place.
+    const redirectTo = safeReturnTo(c.req.query('redirectTo'), cfg.returnOrigins)
     const pkce       = await generatePkce()
 
     const authUrl = buildOidcAuthUrl({
@@ -76,7 +82,10 @@ export function oidcRouter() {
     if (error || !code) return c.redirect(`${cfg.appUrl}/login?error=oidc_denied`)
 
     const verifier = getCookie(c, COOKIE_PKCE)
-    const returnTo = decodeURIComponent(getCookie(c, COOKIE_RETURN_TO) ?? '/')
+    // Again, because the cookie holding it is the client's: a browser that
+    // arrives with one this service never wrote is still a browser to send
+    // somewhere safe.
+    const returnTo = safeReturnTo(decodeURIComponent(getCookie(c, COOKIE_RETURN_TO) ?? '/'), cfg.returnOrigins)
     if (!verifier) return c.redirect(`${cfg.appUrl}/login?error=missing_verifier`)
 
     const body = new URLSearchParams({
@@ -190,7 +199,7 @@ export function oidcRouter() {
   // post_logout_redirect_uri to be registered on the OIDC app.
   app.get('/logout', async (c) => {
     const cfg        = getConfig(process.env as Record<string, string | undefined>)
-    const redirectTo = c.req.query('redirectTo') ?? '/'
+    const redirectTo = safeReturnTo(c.req.query('redirectTo'), cfg.returnOrigins)
     const sso        = c.req.query('sso') === '1'
     const idToken    = getCookie(c, COOKIE_ID_TOKEN)
     const domain     = cfg.cookieDomain ? `; Domain=${cfg.cookieDomain}` : ''
