@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import { encodeSession } from '../lib/cookies.js'
 import { cliRouter } from '../routes/cli.js'
-import { oidcRouter } from '../routes/oidc.js'
+import { oidcRouter, type OidcRouterOptions } from '../routes/oidc.js'
 
 export const JWT_SECRET = 'test-secret-32-chars-long-enough!'
 // Set at import time: a test may build a cookie before createTestApp() runs,
@@ -33,7 +33,7 @@ export function makeForgedSessionCookie(data: Record<string, unknown>) {
   return Buffer.from(JSON.stringify(data), 'utf8').toString('base64url')
 }
 
-export async function createTestApp() {
+export async function createTestApp(opts: OidcRouterOptions = {}) {
   process.env['JWT_SECRET'] = JWT_SECRET
   process.env['APP_PUBLIC_URL'] = 'http://localhost'
   delete process.env['IAM_SERVICE_URL']
@@ -41,7 +41,7 @@ export async function createTestApp() {
   const kv = new InMemoryKv()
 
   const app = new Hono()
-  app.route('/', oidcRouter())
+  app.route('/', oidcRouter(opts))
   app.route('/', cliRouter(kv as never))
 
   function req(method: string, path: string, o: {

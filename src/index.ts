@@ -10,6 +10,7 @@ import { cliRouter } from './routes/cli.js'
 import { tokensRouter } from './routes/tokens.js'
 import { iamEnabled } from './lib/iam.js'
 import { realm } from './lib/realm.js'
+import { devBanner, devLogin } from './lib/dev.js'
 import { serviceManifest } from '@baseworks/core/service'
 import { readFileSync } from 'node:fs'
 
@@ -24,9 +25,15 @@ const VERSION = (() => {
   }
 })()
 
+// Dev mode is decided once, at boot: the password is made up here and must stay
+// the same for the life of the process. Throws under NODE_ENV=production.
+const dev = devLogin()
+
 const app = new Hono()
 app.use('*', logger())
-app.get('/healthz', (c) => c.json({ ok: true, service: 'auth-service', iam: iamEnabled() }))
+app.get('/healthz', (c) => c.json({
+  ok: true, service: 'auth-service', iam: iamEnabled(), ...(dev ? { dev: true } : {}),
+}))
 
 // The contract itself. Served from the repo file so the document and the code
 // ship together and cannot drift apart between releases.
@@ -52,7 +59,8 @@ app.get('/.well-known/service', async (c) => {
       api_version: '1.0',
       openapi_url: '/openapi.yaml',
       capabilities: [
-        'oidc-login',
+        // A client can tell a dev realm from a real one without guessing.
+        dev ? 'dev-login' : 'oidc-login',
         'cli-device-flow',
         'service-token',
         'token-exchange',
@@ -118,7 +126,14 @@ try {
   // fails on the first write — 28 seconds later, as a 500 on `/start`, with the
   // reason nowhere near the request. One ping at boot turns that into a warning
   // on the line above, before anyone has tried to sign in.
-  await withTimeout(redis.ping(), 2000)
+  //
+  // Until the ping settles, keep the reason instead of letting ioredis print an
+  // "Unhandled error event" per reconnect attempt: the warning below says it once.
+  let lastError: Error | undefined
+  const remember = (err: Error) => { lastError = err }
+  redis.on('error', remember)
+  await withTimeout(redis.ping(), 2000).catch((err: Error) => { throw lastError ?? err })
+  redis.off('error', remember)
   kv = kvAdapter(redis)
   console.log(`auth-service using CACHE binding "${kvBinding}"`)
 } catch (err) {
@@ -133,7 +148,7 @@ try {
   kv = memoryKvAdapter()
 }
 
-app.route('/', oidcRouter())
+app.route('/', oidcRouter({ dev }))
 app.route('/', cliRouter(kv))
 app.route('/', tokensRouter())
 
@@ -146,4 +161,8 @@ const port = parseInt(process.env['PORT'] ?? '3000')
 
 serve({ fetch: app.fetch, port }, () => {
   console.log(`auth-service listening on :${port}`)
+  if (dev) {
+    const base = (process.env['APP_PUBLIC_URL'] ?? `http://localhost:${port}`).replace(/\/+$/, '')
+    console.warn(devBanner(dev, `${base}/v1/auth/login`))
+  }
 })

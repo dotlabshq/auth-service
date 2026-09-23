@@ -11,6 +11,8 @@ import { mintIdentityToken } from '../lib/mint.js'
 import { iamEnabled, iamSync } from '../lib/iam.js'
 import { tokenPage } from '../pages/token.js'
 import { returnOrigins, safeReturnTo } from '../lib/return-to.js'
+import { DEV_ISSUER, DEV_SESSION_SECONDS, devCredentialsMatch, type DevLogin } from '../lib/dev.js'
+import { devLoginPage } from '../pages/dev-login.js'
 
 /**
  * Decode a JWT's payload segment. No signature check: the id_token was just
@@ -27,6 +29,9 @@ function parseJwtPayload(jwt: string): Record<string, unknown> | null {
     return null
   }
 }
+
+/** How long a wrong dev password waits before it is answered. */
+export const FAILED_LOGIN_DELAY_MS = 400
 
 function getConfig(env: Record<string, string | undefined>) {
   return {
@@ -74,8 +79,74 @@ function clearAllCookies(c: { header(name: string, value: string, o?: { append?:
   for (const name of names) c.header('Set-Cookie', `${name}=; ${clear}`, { append: true })
 }
 
-export function oidcRouter() {
+/**
+ * Sign the person in: resolve the platform identity, then set the signed
+ * session cookie and the realm identity token. Shared by the OIDC callback and
+ * the dev-mode form, so a dev sign-in is the real thing past this point.
+ *
+ * With IAM present the identity is registered with iam-service (`/sync`) to get
+ * a stable user id; without it this is login-only — the subject IS the
+ * identity. auth deals in NO org (a user has only memberships — an org-service
+ * question).
+ */
+async function startSession(
+  c: { header(name: string, value: string, o?: { append?: boolean }): void },
+  cfg: ReturnType<typeof getConfig>,
+  id: { subject?: string; email?: string; name?: string; picture?: string; issuer?: string; expiresAt: number },
+): Promise<void> {
+  const { subject, email, name, picture, issuer, expiresAt } = id
+  let platformUserId = subject ?? ''
+
+  if (subject && email && issuer && iamEnabled()) {
+    const userId = await iamSync({ subject, issuer, email, name, picture })
+    if (userId) {
+      platformUserId = userId
+    } else {
+      console.error('[oidc] IAM sync failed; falling back to OIDC subject')
+    }
+  }
+
+  const session = encodeSession({
+    isAuthenticated: true,
+    subject:  subject ?? '',
+    email:    email   ?? '',
+    name:     name    ?? '',
+    issuer:   issuer  ?? '',
+    expiresAt,
+    userId:   platformUserId,
+  })
+
+  const expires  = new Date(expiresAt * 1000).toUTCString()
+  const opts     = cookieOpts(cfg.isProd, cfg.cookieDomain)
+  const clearOpt = `HttpOnly; Path=/; Max-Age=0${cfg.cookieDomain ? `; Domain=${cfg.cookieDomain}` : ''}`
+
+  c.header('Set-Cookie', `${COOKIE_PKCE}=; ${clearOpt}`, { append: true })
+  c.header('Set-Cookie', `${COOKIE_RETURN_TO}=; ${clearOpt}`, { append: true })
+  c.header('Set-Cookie', `${COOKIE_SESSION}=${session}; ${opts}; Expires=${expires}`, { append: true })
+
+  // Platform JWT cookie — set on browser login so all services can read it
+  // directly (same JWT the CLI gets via /v1/auth/token). It carries identity
+  // only (`{ sub, type }`); an app that needs org context resolves membership
+  // via org-service.
+  if (platformUserId) {
+    const platformTtl = expiresAt - Math.floor(Date.now() / 1000)
+    const platformJwt = await mintIdentityToken({
+      sub: platformUserId, type: 'human', expiresInSeconds: platformTtl,
+    })
+    if (platformJwt) {
+      c.header('Set-Cookie', `oidc_token=${platformJwt}; ${opts}; Expires=${expires}`, { append: true })
+    }
+  }
+}
+
+export interface OidcRouterOptions {
+  /** Set when dev mode is on: `/login` is then a password form, not the IdP. */
+  dev?: DevLogin | null
+}
+
+export function oidcRouter(opts: OidcRouterOptions = {}) {
   const app = new Hono()
+  const dev = opts.dev ?? null
 
   // GET /login
   app.get('/login', async (c) => {
@@ -83,6 +154,10 @@ export function oidcRouter() {
     // Checked here rather than on the way back, so a poisoned value is never
     // stored in a cookie in the first place.
     const redirectTo = safeReturnTo(requestedReturn(c), cfg.returnOrigins)
+
+    // Dev mode: no IdP to go to. The form carries the return address itself.
+    if (dev) return c.html(devLoginPage({ returnTo: redirectTo }))
+
     const pkce       = await generatePkce()
 
     const authUrl = buildOidcAuthUrl({
@@ -100,8 +175,38 @@ export function oidcRouter() {
     return c.redirect(authUrl)
   })
 
+  // POST /login — dev mode only: the form above posts here.
+  //
+  // A wrong pair answers after a pause, so the form cannot be used to try
+  // passwords at the speed of a loop. The password is random per boot anyway;
+  // this is for the AUTH_DEV_PASSWORD someone chose.
+  app.post('/login', async (c) => {
+    if (!dev) return c.json({ error: 'not_found' }, 404)
+    const cfg  = getConfig(process.env as Record<string, string | undefined>)
+    const form = await c.req.parseBody()
+    const username = typeof form['username'] === 'string' ? form['username'].trim() : ''
+    const password = typeof form['password'] === 'string' ? form['password'] : ''
+    const returnTo = safeReturnTo(typeof form['returnTo'] === 'string' ? form['returnTo'] : undefined, cfg.returnOrigins)
+
+    if (!devCredentialsMatch(dev, username, password)) {
+      await new Promise((r) => setTimeout(r, FAILED_LOGIN_DELAY_MS))
+      return c.html(devLoginPage({ returnTo, error: true, username }), 401)
+    }
+
+    await startSession(c, cfg, {
+      subject:   dev.username,
+      issuer:    DEV_ISSUER,
+      email:     `${dev.username}@dev.localhost`,
+      name:      dev.username,
+      expiresAt: Math.floor(Date.now() / 1000) + DEV_SESSION_SECONDS,
+    })
+    return c.redirect(returnTo)
+  })
+
   // GET /oidc/callback
   app.get('/oidc/callback', async (c) => {
+    // Dev mode has no IdP; nothing legitimate lands here.
+    if (dev) return c.json({ error: 'not_found' }, 404)
     const cfg     = getConfig(process.env as Record<string, string | undefined>)
     const code    = c.req.query('code')
     const error   = c.req.query('error')
@@ -148,53 +253,10 @@ export function oidcRouter() {
     const issuer    = payload['iss'] as string | undefined
     const expiresAt = (payload['exp'] as number | undefined) ?? Math.floor(Date.now() / 1000) + (data.expires_in ?? 3600)
 
-    // Resolve the platform identity. With IAM present, register the identity
-    // with iam-service (`/sync`) to get a stable user id; without it, this is
-    // login-only — the OIDC subject IS the identity. auth deals in NO org (a
-    // user has only memberships — an org-service question).
-    let platformUserId = subject ?? ''
-
-    if (subject && email && issuer && iamEnabled()) {
-      const userId = await iamSync({ subject, issuer, email, name, picture })
-      if (userId) {
-        platformUserId = userId
-      } else {
-        console.error('[oidc] IAM sync failed; falling back to OIDC subject')
-      }
-    }
-
-    const session = encodeSession({
-      isAuthenticated: true,
-      subject:  subject ?? '',
-      email:    email   ?? '',
-      name:     name    ?? '',
-      issuer:   issuer  ?? '',
-      expiresAt,
-      userId:   platformUserId,
-    })
-
-    const expires  = new Date(expiresAt * 1000).toUTCString()
-    const opts     = cookieOpts(cfg.isProd, cfg.cookieDomain)
-    const clearOpt = `HttpOnly; Path=/; Max-Age=0${cfg.cookieDomain ? `; Domain=${cfg.cookieDomain}` : ''}`
-
-    c.header('Set-Cookie', `${COOKIE_PKCE}=; ${clearOpt}`, { append: true })
-    c.header('Set-Cookie', `${COOKIE_RETURN_TO}=; ${clearOpt}`, { append: true })
+    await startSession(c, cfg, { subject, email, name, picture, issuer, expiresAt })
+    const expires = new Date(expiresAt * 1000).toUTCString()
+    const opts    = cookieOpts(cfg.isProd, cfg.cookieDomain)
     c.header('Set-Cookie', `${COOKIE_ID_TOKEN}=${data.id_token}; ${opts}; Expires=${expires}`, { append: true })
-    c.header('Set-Cookie', `${COOKIE_SESSION}=${session}; ${opts}; Expires=${expires}`, { append: true })
-
-    // Platform JWT cookie — set on browser login so all services can read it
-    // directly (same JWT the CLI gets via /v1/auth/token). It carries identity
-    // only (`{ sub, type }`); an app that needs org context resolves membership
-    // via org-service.
-    if (platformUserId) {
-      const platformTtl = expiresAt - Math.floor(Date.now() / 1000)
-      const platformJwt = await mintIdentityToken({
-        sub: platformUserId, type: 'human', expiresInSeconds: platformTtl,
-      })
-      if (platformJwt) {
-        c.header('Set-Cookie', `oidc_token=${platformJwt}; ${opts}; Expires=${expires}`, { append: true })
-      }
-    }
 
     if (data.access_token) {
       c.header('Set-Cookie', `${COOKIE_ACCESS}=${data.access_token}; ${opts}; Expires=${expires}`, { append: true })
@@ -230,7 +292,8 @@ export function oidcRouter() {
 
     clearAllCookies(c, cfg.cookieDomain)
 
-    if (sso) {
+    // There is no IdP session to end in dev mode.
+    if (sso && !dev) {
       try {
         const discovery = await fetch(`${cfg.issuer}/.well-known/openid-configuration`)
           .then((r) => r.json()) as { end_session_endpoint?: string }

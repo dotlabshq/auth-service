@@ -145,6 +145,8 @@ organisations.
 | `JWT_SECRET` | **Legacy.** HS256, accepted while set — see below |
 | `AUTH_CLI_APPROVE_URL` | Where `/start` sends a person to approve a CLI sign-in; defaults to this service's own page |
 | `AUTH_RETURN_ORIGINS` | Extra origins `returnTo` may point at, comma-separated; `APP_PUBLIC_URL` is always allowed |
+| `AUTH_DEV_MODE` | `1` to sign in with a password instead of the IdP — [dev mode](#dev-mode-a-password-instead-of-an-identity-provider); never in production |
+| `AUTH_DEV_USER` · `AUTH_DEV_PASSWORD` | The dev account; default `admin` and a password made up at boot |
 | `AUTH_SESSION_SECRET` | Key for the session cookie's signature; defaults to one derived from `JWT_SECRET`, else `AUTH_SIGNING_KEY` |
 | `OIDC_*`, `APP_PUBLIC_URL`, `IAM_SERVICE_URL`, `KV_CACHE_URL` | Unchanged |
 
@@ -201,6 +203,7 @@ Routes live at the service root. Behind a gateway the realm is reached at
 |---|---|
 | `GET /healthz` · `GET /.well-known/service` · `GET /.well-known/jwks.json` | Discovery, unauthenticated |
 | `GET /login` · `/oidc/callback` · `/session` · `/token` | Browser sign-in |
+| `POST /login` | Dev mode only: the password form posts here |
 | `GET /logout` · `POST /logout` | Sign out by navigation (redirects to `returnTo`), or by `fetch()` (204) |
 | `GET /start` · `GET /poll/:state` · `POST /approve` | CLI device flow |
 | `POST /service-token` · `POST /exchange` | Tokens that are not a browser login |
@@ -239,6 +242,33 @@ pnpm dev     # tsx watch, reads .env.local
 pnpm test    # vitest
 pnpm build   # tsup
 ```
+
+### Dev mode: a password instead of an identity provider
+
+A realm on a laptop should not need a Zitadel project before anyone can open
+the console. Set `AUTH_DEV_MODE=1` and `/login` becomes a username/password
+form; the account is printed when the service starts:
+
+```
+  auth-service: DEV MODE — no identity provider, password sign-in
+    sign in at  http://localhost:8080/v1/auth/login
+    user        admin
+    password    1cbbrmMplLFHRcmp
+```
+
+The password is new on every start unless `AUTH_DEV_PASSWORD` fixes it;
+`AUTH_DEV_USER` renames the account. Past the form everything is the ordinary
+path — the same signed session, the same identity token, the same IAM `/sync`
+— so the console and `bw login` work unchanged. The identity is always
+`urn:baseworks:dev` + the username, so with IAM present it keeps one user id,
+and its memberships, across restarts.
+
+In dev mode `/oidc/callback` answers 404 and `/logout?sso=1` is a local logout.
+**Under `NODE_ENV=production` the service refuses to start** with
+`AUTH_DEV_MODE` set: a realm entered with a password from an env var has no
+identity provider, and that must never be one flag away from production.
+`/healthz` says `dev: true` and `/.well-known/service` lists `dev-login` in
+place of `oidc-login`, so nothing has to guess.
 
 Build the image from the monorepo root:
 

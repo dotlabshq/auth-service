@@ -108,7 +108,37 @@ paths:
       parameters:
         - $ref: "#/components/parameters/ReturnTo"
       responses:
+        "200":
+          description: Dev mode only — the password form, which posts to `POST /login`
+          content:
+            text/html:
+              schema: { type: string }
         "302": { description: Redirect to the identity provider }
+    post:
+      tags: [browser]
+      summary: Dev mode only — sign in with the dev account
+      description: |
+        Exists only when the service runs with `AUTH_DEV_MODE=1`, which it
+        refuses under `NODE_ENV=production`; otherwise 404. In dev mode
+        `GET /login` answers this form instead of redirecting to the identity
+        provider. Success sets the same session and identity token an OIDC
+        sign-in does.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string }
+                password: { type: string }
+                returnTo: { type: string, description: "Checked like the query parameter on GET" }
+      responses:
+        "302": { description: Signed in; redirect to returnTo }
+        "401": { description: "Wrong user or password; the form again, as HTML" }
+        "404": { description: Not in dev mode }
 
   /oidc/callback:
     get:

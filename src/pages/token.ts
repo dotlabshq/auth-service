@@ -1,3 +1,10 @@
+import { escapeHtml } from '../lib/html.js'
+
+/**
+ * The approval page. `state` arrives in the query string, so it is escaped:
+ * echoed raw, `?state="><script>…` ran script on the realm's origin — the
+ * origin the console and the session cookie share.
+ */
 export function tokenPage(state: string): string {
   const base = (process.env['APP_PUBLIC_URL'] ?? '').replace(/\/+$/, '')
   const approveUrl = `${base}/v1/auth/approve`
@@ -28,7 +35,7 @@ export function tokenPage(state: string): string {
   <h1>Authorize CLI Access</h1>
   <p>A CLI session is requesting access to your account. Approving will allow your terminal to authenticate as you.</p>
   <form method="POST" action="${approveUrl}">
-    <input type="hidden" name="state" value="${state}">
+    <input type="hidden" name="state" value="${escapeHtml(state)}">
     <button type="submit">Approve</button>
   </form>
 </body>
