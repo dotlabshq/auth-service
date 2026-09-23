@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import { getCookie } from 'hono/cookie'
 import { generatePkce, buildOidcAuthUrl } from '@baseworks/auth/pkce'
 import {
-  cookieOpts, encodeSession, decodeSession, serializeSession, ALL_OIDC_COOKIES,
+  cookieOpts, encodeSession, serializeSession, ALL_OIDC_COOKIES,
   COOKIE_PKCE, COOKIE_RETURN_TO, COOKIE_ID_TOKEN, COOKIE_SESSION, COOKIE_ACCESS, COOKIE_REFRESH,
   COOKIE_PLATFORM_JWT,
   parseSession,
@@ -47,6 +47,33 @@ function getConfig(env: Record<string, string | undefined>) {
   }
 }
 
+/**
+ * The page to come back to, as the caller asked for it.
+ *
+ * `returnTo` is the name — it is what openapi.yaml publishes and what the
+ * console and doubletap send. The code used to read `redirectTo`, so every
+ * caller's value was ignored and everybody landed on `/`. `redirectTo` is
+ * still read for links written against the old name.
+ */
+function requestedReturn(c: { req: { query(name: string): string | undefined } }): string | undefined {
+  return c.req.query('returnTo') ?? c.req.query('redirectTo')
+}
+
+/** decodeURIComponent, minus the URIError a hand-edited cookie can throw. */
+function decodeCookieValue(v: string | undefined): string | undefined {
+  if (v === undefined) return undefined
+  try { return decodeURIComponent(v) } catch { return undefined }
+}
+
+/** Every cookie this service issues, expired. */
+function clearAllCookies(c: { header(name: string, value: string, o?: { append?: boolean }): void }, cookieDomain?: string) {
+  const clear = `HttpOnly; Path=/; Max-Age=0${cookieDomain ? `; Domain=${cookieDomain}` : ''}`
+  // Including the platform JWT (`oidc_token`) that downstream services read to
+  // identify the user.
+  const names = [...new Set([...ALL_OIDC_COOKIES, COOKIE_PLATFORM_JWT, COOKIE_PKCE, COOKIE_RETURN_TO, 'oidc_token'])]
+  for (const name of names) c.header('Set-Cookie', `${name}=; ${clear}`, { append: true })
+}
+
 export function oidcRouter() {
   const app = new Hono()
 
@@ -55,7 +82,7 @@ export function oidcRouter() {
     const cfg        = getConfig(process.env as Record<string, string | undefined>)
     // Checked here rather than on the way back, so a poisoned value is never
     // stored in a cookie in the first place.
-    const redirectTo = safeReturnTo(c.req.query('redirectTo'), cfg.returnOrigins)
+    const redirectTo = safeReturnTo(requestedReturn(c), cfg.returnOrigins)
     const pkce       = await generatePkce()
 
     const authUrl = buildOidcAuthUrl({
@@ -85,7 +112,7 @@ export function oidcRouter() {
     // Again, because the cookie holding it is the client's: a browser that
     // arrives with one this service never wrote is still a browser to send
     // somewhere safe.
-    const returnTo = safeReturnTo(decodeURIComponent(getCookie(c, COOKIE_RETURN_TO) ?? '/'), cfg.returnOrigins)
+    const returnTo = safeReturnTo(decodeCookieValue(getCookie(c, COOKIE_RETURN_TO)), cfg.returnOrigins)
     if (!verifier) return c.redirect(`${cfg.appUrl}/login?error=missing_verifier`)
 
     const body = new URLSearchParams({
@@ -185,32 +212,23 @@ export function oidcRouter() {
 
   // GET /session
   app.get('/session', (c) => {
-    const raw = getCookie(c, COOKIE_SESSION)
-    if (!raw) return c.json({ is_authenticated: false }, 401)
-    const parsed = decodeSession(raw)
-    if (!parsed || !parsed.isAuthenticated) return c.json({ is_authenticated: false }, 401)
+    const parsed = parseSession(c)
+    if (!parsed) return c.json({ is_authenticated: false }, 401)
     return c.json(serializeSession(parsed))
   })
 
-  // GET /logout
+  // GET /logout — a link or a navigation.
   // Local logout by default: clears this app's cookies and returns to the app
   // root — no dependency on the IdP. Full single-sign-out (also ending the
   // Zitadel session) is opt-in with `?sso=1`, which requires the
   // post_logout_redirect_uri to be registered on the OIDC app.
   app.get('/logout', async (c) => {
     const cfg        = getConfig(process.env as Record<string, string | undefined>)
-    const redirectTo = safeReturnTo(c.req.query('redirectTo'), cfg.returnOrigins)
+    const redirectTo = safeReturnTo(requestedReturn(c), cfg.returnOrigins)
     const sso        = c.req.query('sso') === '1'
     const idToken    = getCookie(c, COOKIE_ID_TOKEN)
-    const domain     = cfg.cookieDomain ? `; Domain=${cfg.cookieDomain}` : ''
-    const clear      = `HttpOnly; Path=/; Max-Age=0${domain}`
 
-    // Clear every cookie this service issues — including the platform JWT
-    // (`oidc_token`) that downstream services read to identify the user.
-    const cookieNames = [...new Set([...ALL_OIDC_COOKIES, COOKIE_PLATFORM_JWT, COOKIE_PKCE, COOKIE_RETURN_TO, 'oidc_token'])]
-    for (const name of cookieNames) {
-      c.header('Set-Cookie', `${name}=; ${clear}`, { append: true })
-    }
+    clearAllCookies(c, cfg.cookieDomain)
 
     if (sso) {
       try {
@@ -219,7 +237,7 @@ export function oidcRouter() {
         if (discovery.end_session_endpoint) {
           const endUrl = new URL(discovery.end_session_endpoint)
           // Absolute URL that must EXACTLY match a registered post-logout URI.
-          // Precedence: ?redirectTo=<absolute> > OIDC_POST_LOGOUT_URL > app
+          // Precedence: ?returnTo=<absolute> > OIDC_POST_LOGOUT_URL > app
           // origin (all without a trailing slash so "…/" mismatches don't bite).
           const post = redirectTo.startsWith('http')
             ? redirectTo.replace(/\/+$/, '')
@@ -235,6 +253,16 @@ export function oidcRouter() {
     return c.redirect(redirectTo)
   })
 
+  // POST /logout — the same local logout, for a page that signs out with
+  // fetch() and draws its own next screen. A redirect would hand fetch() a page
+  // of HTML it has no use for, so the answer is an empty 204 carrying the
+  // cleared cookies.
+  app.post('/logout', (c) => {
+    const cfg = getConfig(process.env as Record<string, string | undefined>)
+    clearAllCookies(c, cfg.cookieDomain)
+    return c.body(null, 204)
+  })
+
   // GET /token
   // - CLI flow  (state param present): session yoksa login'e redirect, varsa approve HTML göster
   // - API flow  (state param yoksa):   session yoksa 401, varsa JWT JSON döndür
@@ -248,8 +276,8 @@ export function oidcRouter() {
       // CLI flow: OIDC login'e yönlendir, state'i returnTo ile koru.
       // returnTo must include the /v1/auth base path — Traefik strips it before
       // this service sees the request, so a bare "/token" would 404 the app root.
-      const redirectTo = `/v1/auth/token?state=${state}`
-      return c.redirect(`${base}/v1/auth/login?redirectTo=${encodeURIComponent(redirectTo)}`)
+      const returnTo = `/v1/auth/token?state=${state}`
+      return c.redirect(`${base}/v1/auth/login?returnTo=${encodeURIComponent(returnTo)}`)
     }
 
     // CLI flow: session var → approve sayfasını göster

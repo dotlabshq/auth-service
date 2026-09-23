@@ -106,10 +106,7 @@ paths:
       summary: Begin OIDC sign-in
       security: []
       parameters:
-        - name: returnTo
-          in: query
-          schema: { type: string }
-          description: App-relative path to return to after sign-in
+        - $ref: "#/components/parameters/ReturnTo"
       responses:
         "302": { description: Redirect to the identity provider }
 
@@ -149,14 +146,30 @@ paths:
   /logout:
     get:
       tags: [browser]
-      summary: Clear this app's cookies
+      summary: Clear this app's cookies, then go somewhere
       description: |
-        Local by default. Note that an already-issued token stays valid until it
-        expires — the realm has no revocation list today, which is what `jti` in
-        every token is there to make possible later.
+        For a link or a navigation. Local by default; `sso=1` also ends the
+        identity provider's session. Note that an already-issued token stays
+        valid until it expires — the realm has no revocation list today, which
+        is what `jti` in every token is there to make possible later.
       security: []
+      parameters:
+        - $ref: "#/components/parameters/ReturnTo"
+        - name: sso
+          in: query
+          schema: { type: string, enum: ["1"] }
+          description: Also sign out at the identity provider
       responses:
         "302": { description: Redirect }
+    post:
+      tags: [browser]
+      summary: Clear this app's cookies, for a page that signs out with fetch()
+      description: |
+        The same local logout as `GET`, answered without a redirect: a page that
+        draws its own next screen has no use for one.
+      security: []
+      responses:
+        "204": { description: Cookies cleared }
 
   /token:
     get:
@@ -237,19 +250,28 @@ paths:
     post:
       tags: [cli]
       summary: Approve a waiting CLI sign-in
-      description: Submitted by the approval page from a signed-in browser.
+      description: |
+        Submitted from a signed-in browser — by this service's own approval page
+        as a form, or by a console screen as JSON. The token is in neither
+        answer: it belongs to the waiting CLI, which collects it from `/poll`.
       security: []
       requestBody:
         required: true
         content:
           application/x-www-form-urlencoded:
-            schema:
-              type: object
-              required: [state]
-              properties:
-                state: { type: string }
+            schema: { $ref: "#/components/schemas/ApproveRequest" }
+          application/json:
+            schema: { $ref: "#/components/schemas/ApproveRequest" }
       responses:
-        "302": { description: Redirect to the done page }
+        "200":
+          description: Approved (JSON callers)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean, const: true }
+        "302": { description: Approved; redirect to the done page (form callers) }
         "401": { description: Not signed in }
         "404": { description: Unknown or expired handle }
         "409": { description: Already used }
@@ -325,6 +347,17 @@ paths:
         "403": { description: The presented token is not a human token }
 
 components:
+  parameters:
+    ReturnTo:
+      name: returnTo
+      in: query
+      schema: { type: string }
+      description: |
+        Where to send the browser afterwards: a path on the current origin, or
+        an absolute URL on an origin the realm publishes (`APP_PUBLIC_URL` and
+        `AUTH_RETURN_ORIGINS`). Anything else becomes `/`. `redirectTo` is
+        accepted as an older name for the same thing.
+
   securitySchemes:
     bearerAuth:
       type: http
@@ -332,6 +365,11 @@ components:
       bearerFormat: JWT
 
   schemas:
+    ApproveRequest:
+      type: object
+      required: [state]
+      properties:
+        state: { type: string, description: The handle `/start` returned }
     TokenResponse:
       type: object
       required: [token, token_type, expires_in]
@@ -362,7 +400,7 @@ components:
         crv: { type: string, example: P-256 }
         alg: { type: string, example: ES256 }
         use: { type: string, example: sig }
-        kid: { type: string, description: RFC 7638 thumbprint, derived from the key }
+        kid: { type: string, description: "RFC 7638 thumbprint, derived from the key" }
         x: { type: string }
         y: { type: string }
 

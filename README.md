@@ -6,6 +6,11 @@ A realm is one deployment of this plane: one auth-service, one signing key pair,
 and the services that trust it. A token issued here is accepted by every service
 in that realm and by no other.
 
+**In the local realm:** port 3003, published by the gateway at `/v1/auth`.
+From the workspace root: `just start auth` · `just logs auth` · `just restart auth`.
+See the workspace [README](../../README.md) for the whole map and
+[AGENTS.md](../../AGENTS.md) for the rules every service here follows.
+
 ## What a token is
 
 An identity token and nothing more:
@@ -139,6 +144,8 @@ organisations.
 | `AUTH_SERVICE_CLIENTS` | `name:secret,name:secret` for `/service-token` |
 | `JWT_SECRET` | **Legacy.** HS256, accepted while set — see below |
 | `AUTH_CLI_APPROVE_URL` | Where `/start` sends a person to approve a CLI sign-in; defaults to this service's own page |
+| `AUTH_RETURN_ORIGINS` | Extra origins `returnTo` may point at, comma-separated; `APP_PUBLIC_URL` is always allowed |
+| `AUTH_SESSION_SECRET` | Key for the session cookie's signature; defaults to one derived from `JWT_SECRET`, else `AUTH_SIGNING_KEY` |
 | `OIDC_*`, `APP_PUBLIC_URL`, `IAM_SERVICE_URL`, `KV_CACHE_URL` | Unchanged |
 
 Base64 is accepted for key material because environment variables, Kubernetes
@@ -160,6 +167,15 @@ gets committed, backed up and copied. The key id is derived from the key itself
 2. Put the **old public** key in `AUTH_RETIRED_PUBLIC_KEYS` and the new private
    key in `AUTH_SIGNING_KEY`. Both are now published; new tokens use the new key.
 3. After the longest token lifetime has passed, drop the retired key.
+
+### The session cookie is signed, and that has a cost
+
+`oidc_session` carries an HMAC tag, because `/token` and `/approve` mint a
+token for whoever it names. The key comes from `AUTH_SESSION_SECRET` if set,
+else from `JWT_SECRET`, else from `AUTH_SIGNING_KEY` — so **changing whichever
+of those is in use signs every browser out once**. Rotating the signing key and
+step 5 below both do it. Set `AUTH_SESSION_SECRET` to make the cookie
+independent of both.
 
 ### Migrating off the shared secret
 
@@ -184,7 +200,8 @@ Routes live at the service root. Behind a gateway the realm is reached at
 | | |
 |---|---|
 | `GET /healthz` · `GET /.well-known/service` · `GET /.well-known/jwks.json` | Discovery, unauthenticated |
-| `GET /login` · `/oidc/callback` · `/session` · `/logout` · `/token` | Browser sign-in |
+| `GET /login` · `/oidc/callback` · `/session` · `/token` | Browser sign-in |
+| `GET /logout` · `POST /logout` | Sign out by navigation (redirects to `returnTo`), or by `fetch()` (204) |
 | `GET /start` · `GET /poll/:state` · `POST /approve` | CLI device flow |
 | `POST /service-token` · `POST /exchange` | Tokens that are not a browser login |
 

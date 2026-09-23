@@ -63,6 +63,9 @@ export function parseSession(c: Context): OidcSession | null {
   if (!raw) return null
   const parsed = decodeSession(raw)
   if (!parsed || !parsed.isAuthenticated) return null
+  // The cookie's own Expires is advice to the browser; a client can keep
+  // sending it. The signed expiry inside is the one that counts.
+  if (!(parsed.expiresAt > Math.floor(Date.now() / 1000))) return null
   return parsed
 }
 
@@ -100,7 +103,10 @@ export function parseSession(c: Context): OidcSession | null {
  * mint a token either, so browser sign-in is not available regardless.
  */
 export function sessionKey(env: NodeJS.ProcessEnv = process.env): Buffer | null {
-  const material = env['AUTH_SESSION_SECRET'] ?? env['JWT_SECRET'] ?? env['AUTH_SIGNING_KEY']
+  // `||`, not `??`: a variable left empty in a .env file (`JWT_SECRET=`) is
+  // unset, not a key. With `??` it shadowed AUTH_SIGNING_KEY and every
+  // callback failed to sign its cookie. realm.ts reads it the same way.
+  const material = env['AUTH_SESSION_SECRET'] || env['JWT_SECRET'] || env['AUTH_SIGNING_KEY']
   if (!material) return null
   return createHash('sha256').update(`baseworks.session\u0000${material}`).digest()
 }

@@ -110,8 +110,9 @@ const env = createEnv()
 // its only state is short-lived OIDC/CLI login state, correct for a single
 // instance. Bind a `redis://` CACHE for multi-instance / restart-durable state.
 let kv: KvClient
+let redis: Redis | undefined
 try {
-  const redis = await env.kv<Redis>(kvBinding)
+  redis = await env.kv<Redis>(kvBinding)
   // Resolving the binding only builds a client: ioredis connects lazily, so a
   // cache that is configured but not running is still "resolved" here and only
   // fails on the first write — 28 seconds later, as a 500 on `/start`, with the
@@ -125,6 +126,10 @@ try {
     `auth-service: no usable CACHE binding "${kvBinding}" (${(err as Error).message}) — ` +
       `falling back to in-memory KV (single-instance, non-durable)`,
   )
+  // Stop the client that failed the ping: left alone, ioredis keeps
+  // reconnecting in the background for the life of the process, and a cache
+  // this instance is not going to use is only noise in the log.
+  redis?.disconnect()
   kv = memoryKvAdapter()
 }
 
