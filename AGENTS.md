@@ -1,125 +1,83 @@
 # AGENTS.md — auth-service
 
-Operating manual for AI coding agents. Read this before wiring auth into a
-project or changing this service. Companion: [README.md](./README.md).
+Operating manual for whoever changes this service. [README.md](./README.md) is
+how to use it; [openapi.yaml](./openapi.yaml) is the contract; the workspace
+[AGENTS.md](../../AGENTS.md) is the layer above both. The same session owns
+[`@baseworks/auth`](../../packages/baseworks-auth) — the SDK side of the brick.
 
 ## What this service is
 
-A stateless OIDC/PKCE login service that runs **as a sibling of your app on the
-same origin** (`/v1/auth`) and gives the app a verifiable `oidc_token` cookie
-carrying **identity only** (`{ sub, type }`). It owns **no database**.
+The realm's sign-in gate and its **only token issuer**. It signs a person in
+(OIDC with PKCE, or a password in [dev mode](./README.md#dev-mode-a-password-instead-of-an-identity-provider)),
+keeps the browser session, approves `bw login`, and mints identity tokens. It
+owns **no database**: durable identity is iam-service's (`POST /sync` turns a
+login into a stable user id), organisations are org-service's.
 
-auth deals in identity, never orgs. A user has no org of their own — only
-memberships — so org context is an **org-service** question, resolved by the app
-when it needs one, never carried in the auth token. Durable identity lives in
-[iam-service](../iam-service): when reachable, auth registers the login there
-(`/sync`) to get a stable user id; otherwise it is **login-only** (the OIDC
-subject is the identity).
+Where the line between the two repositories runs: **the service is the web-facing
+side** — anything that signs someone in, holds a session or mints. **The package
+is what consumers share** — `requireAuth`, the verifier, the CLI login commands.
+A second place that signs people in is a bug, which is why the package's
+Next.js session modules were removed in its 1.0.0.
 
-## The one rule
+## The rules
 
-**auth never persists user or org data.** If you find yourself adding a table,
-a migration, or a `@baseworks/account`/`@baseworks/organization` import here, stop
-— that belongs in iam-service. auth's only persistence is a cache (`env.kv`) for
-transient PKCE/CLI state.
+1. **auth never persists user or org data.** Its only state is the cache
+   (`env.kv('CACHE')`) for short-lived PKCE/CLI handles. A table, a migration,
+   or an org import here belongs in iam-service or org-service instead.
+2. **A token says who, never where** (ADR-042 §1). `iss aud sub iat exp jti
+   type`, nothing else. No `org_id`, no role, no endpoint that mints for an
+   arbitrary subject — `/service-token` is the caller itself, `/exchange` is
+   the same subject narrowed.
+3. **Only this service signs.** ES256 with `AUTH_SIGNING_KEY`; everyone else
+   verifies against `/.well-known/jwks.json`. `JWT_SECRET` is legacy HS256,
+   accepted while set, and on its way out.
+4. **Nothing the browser sends is believed unchecked.** The session cookie is
+   HMAC-tagged and carries its own expiry; `returnTo` is a same-origin path or
+   an origin the realm publishes (`APP_PUBLIC_URL`, `AUTH_RETURN_ORIGINS`);
+   anything a page echoes goes through `escapeHtml`. Each of these was once a
+   way to become someone else or to be sent somewhere else.
+5. **Dev mode never reaches production.** `AUTH_DEV_MODE` with
+   `NODE_ENV=production` stops the service at boot. Keep it that way.
+6. **Snake_case on the wire** (ADR-043). The session *cookie* keeps its own
+   camelCase shape: it is storage, and renaming it signs everyone out.
 
-## Architecture in one paragraph
+## Where things are
 
-`createEnv()` (from `@baseworks/sdk`) resolves one cache binding — `env.kv('CACHE')`
-returns a raw `ioredis` client for transient PKCE/CLI state (`KV_CACHE_URL`, no
-substrate URLs in config, ADR-0004). On `/login` auth builds a PKCE auth URL; on
-`/oidc/callback` it exchanges the code, then **resolves the platform identity**:
-if `IAM_SERVICE_URL` is set it calls iam-service (`/sync` → user id), otherwise the
-OIDC `subject` is the identity. It stores `{ userId }` in the session cookie and
-sets the `oidc_token` JWT (HS256, `JWT_SECRET`, `{ sub, type }`). Downstream apps
-verify that JWT and read `sub`. Files: `src/routes/oidc.ts` (browser),
-`src/routes/cli.ts` (device flow), `src/lib/iam.ts` (IAM `/sync` client + mode
-detection), `src/lib/cookies.ts` (cookie shapes), `src/index.ts` (wiring).
-
-## How to integrate auth into a Flect app
-
-Goal: give an app "sign in with our IdP" without a separate domain or a
-cross-site cookie. Steps:
-
-1. **Add auth as a sibling app** in the app's `flect.toml`, exposed on the same
-   origin at `/v1/auth`:
-   ```toml
-   [[apps]]
-   name   = "auth"
-   image  = "ghcr.io/dotlabshq/auth-service:0.4.0"
-   port   = 3000
-   expose = "/v1/auth"
-   ```
-2. **Register a PKCE client** on the IdP with redirect URI
-   `${APP_PUBLIC_URL}/v1/auth/oidc/callback`. You often need one deploy first to
-   learn the generated `APP_PUBLIC_URL` (`https://<app>-<shortid>.up.flect.run`),
-   then register the callback and set the id.
-3. **Set `[vars]`** — `JWT_SECRET` (the shared realm secret, **same value the app
-   uses to verify**), `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `APP_PUBLIC_URL`. auth
-   shares the app's cache (binding `CACHE`), so declare no store for it.
-4. **In the app, read the cookie.** Verify `oidc_token` (HS256, `JWT_SECRET`) and
-   use `sub` as the user id:
-   ```ts
-   import { getCookie } from "hono/cookie"
-   import { createHmac, timingSafeEqual } from "node:crypto"
-   function userFrom(c): string | null {
-     const t = getCookie(c, "oidc_token"); if (!t) return null
-     const [h, p, s] = t.split("."); if (!h || !p || !s) return null
-     const exp = createHmac("sha256", process.env.JWT_SECRET!).update(`${h}.${p}`).digest("base64url")
-     if (!timingSafeEqual(Buffer.from(s), Buffer.from(exp))) return null
-     const c2 = JSON.parse(Buffer.from(p, "base64url").toString())
-     return c2.exp * 1000 > Date.now() ? c2.sub : null
-   }
-   ```
-5. **Add login/logout links** — redirect to `/v1/auth/login?redirectTo=/` and
-   `/v1/auth/logout?redirectTo=/`.
-
-That is the whole login-only integration. `examples/notes` in the flect repo is a
-working reference.
-
-### Registering identities in IAM (identity mode)
-
-Turn this on so logins map to a **stable, durable user id** (instead of the raw
-OIDC subject) — e.g. so the same person keeps one id across IdP changes, and
-other services can resolve them:
-
-1. Deploy [iam-service](../iam-service) reachable from auth.
-2. Bind it as a service so auth **discovers** it — the deployer injects
-   `IAM_SERVICE_URL` (auth calls `POST /sync`). If IAM is reached through a
-   gateway rather than a direct service binding, also set `IAM_BASE_PATH=/v1/iam`.
-
-With IAM present, `oidc_token.sub` is the IAM user id and `/healthz` reports
-`iam:true`. The token shape is unchanged (identity only). **Orgs are never
-auth's job** — an app that needs org context calls org-service directly; there is
-no `org_id` claim and no `/token-for-org`.
+```
+src/index.ts          wiring: boot (dev mode, cache ping), discovery, routers
+src/routes/oidc.ts    /login /oidc/callback /session /logout /token;
+                      startSession() — the one place a sign-in becomes a session
+src/routes/cli.ts     /start /poll/:state /approve — the `bw login` device flow
+src/routes/tokens.ts  /service-token /exchange
+src/lib/realm.ts      signing keys, issuer, audience, JWKS
+src/lib/mint.ts       mintIdentityToken — every token goes through it
+src/lib/cookies.ts    cookie names, the signed session codec
+src/lib/return-to.ts  what returnTo may be
+src/lib/dev.ts        dev mode: the account, the production refusal
+src/lib/iam.ts        POST /sync client
+src/pages/            the approval page and the dev sign-in form
+```
 
 ## Contracts you must not break
 
-- **Shared-realm `JWT_SECRET`.** auth signs `oidc_token`; every consumer verifies
-  with the same secret. Changing it invalidates all live sessions.
-- **`oidc_token` claim shape** — `{ sub, type:"human" }`. Identity only; there is
-  no `org_id` claim. An app that needs org context resolves membership via
-  org-service — auth never scopes a token to an org.
-- **Same origin.** auth must be `expose`d under the app's origin (`/v1/auth`) so
-  the cookie is same-site. A separate subdomain reintroduces the cross-site
-  cookie problem this design avoids.
-- **IAM discovery, not configuration.** `IAM_SERVICE_URL` comes from a service
-  binding; never hardcode a platform endpoint in `flect.toml` (ADR-0004).
+- **The token's claim set and the JWKS.** Every service in the realm verifies
+  with `@baseworks/auth/hono`; a claim renamed here is an outage there.
+- **`/start` → `/poll` semantics.** `bw` polls until `expires_in`; an unknown
+  and an expired handle both answer `expired`.
+- **`returnTo`** is the parameter name (`redirectTo` is still read). The
+  console and doubletap send it.
+- **The session key.** It is derived from `AUTH_SESSION_SECRET`, else
+  `JWT_SECRET`, else `AUTH_SIGNING_KEY`. Changing the one in use signs every
+  browser out.
 
-## Depends on
-
-- An OIDC IdP (issuer + PKCE client).
-- `@baseworks/sdk` — `env.kv('CACHE')` resolves the cache (raw `ioredis`).
-- Optionally iam-service (`IAM_SERVICE_URL`) for durable identity.
-
-## Build / test / ship
+## Build / test
 
 ```bash
-pnpm test                    # 15 tests: CLI flow (/start /poll), /session, /token, login-only
-pnpm build                   # runs tests, then tsup → dist/index.js
-just release-docker <tag>    # build + push ghcr.io/dotlabshq/auth-service:<tag>
+pnpm test     # vitest; routers over an in-memory KV, no Redis, IdP or IAM needed
+pnpm build    # tests, then tsup
 ```
 
-Tests wire the routers over an in-memory KV (`src/__tests__/setup.ts`) — no real
-cache or IAM needed. `/token` and CLI `/approve` mint from the session cookie, so
-IAM mode needs no mock (identity is already resolved into the session).
+Tests go through the routers with real requests (`src/__tests__/setup.ts`).
+A rule about what the service accepts is tested through the route, not only
+through the helper — a helper tested alone is how `?returnTo=` went unread for
+a whole release while `safeReturnTo` had full coverage.

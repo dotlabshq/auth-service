@@ -185,7 +185,7 @@ Order matters, and each step is safe on its own:
 
 1. Deploy this service **without** `AUTH_SIGNING_KEY`. It keeps issuing HS256
    and behaves exactly as before.
-2. Upgrade verifiers to `@baseworks/auth` 0.3.0 and give them `AUTH_JWKS_URI`.
+2. Upgrade verifiers to `@baseworks/auth` 0.3.0 or later and give them `AUTH_JWKS_URI`.
    They accept both algorithms while `JWT_SECRET` is set.
 3. Set `AUTH_SIGNING_KEY` here. New tokens are ES256; old ones keep verifying
    until they expire.
