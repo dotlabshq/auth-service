@@ -15,6 +15,8 @@
  * set `IAM_BASE_PATH=/v1/iam`.
  */
 
+import { mintIdentityToken } from './mint.js'
+
 function iamBase(): string | null {
   const url = (process.env['IAM_SERVICE_URL'] ?? '').replace(/\/+$/, '')
   if (!url) return null
@@ -34,13 +36,27 @@ export interface OidcIdentity {
   picture?: string
 }
 
-/** Upsert the OIDC identity in IAM → the platform user id (or null on failure). */
+/**
+ * The name auth signs its own service token with. iam accepts `/sync` only
+ * from the services in its IAM_SYNC_CALLERS (default `auth-service`).
+ */
+const serviceName = () => process.env['AUTH_SERVICE_NAME'] ?? 'auth-service'
+
+/**
+ * Upsert the OIDC identity in IAM → the platform user id (or null on failure).
+ *
+ * Called with a short-lived service token auth signs for itself: iam no longer
+ * takes an identity from just anyone, because whoever may call `/sync` decides
+ * which email belongs to which account.
+ */
 export async function iamSync(id: OidcIdentity): Promise<string | null> {
   const base = iamBase()
   if (!base) return null
+  const token = await mintIdentityToken({ sub: serviceName(), type: 'service', expiresInSeconds: 60 })
+  if (!token) return null
   const res = await fetch(`${base}/sync`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
     body: JSON.stringify(id),
   }).catch(() => null)
   if (!res?.ok) return null
