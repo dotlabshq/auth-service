@@ -1,0 +1,8 @@
+# Read by BuildKit for Dockerfile.workspace (the context is the monorepo root).
+**/node_modules
+**/.env*
+!**/.env.example
+**/.git
+**/dist
+**/*.db
+**/*.db-*

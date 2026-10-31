@@ -1,6 +1,10 @@
 # auth-service — built from the baseworks-ts monorepo ROOT:
 #   podman build -f projects/auth-service/Dockerfile.workspace -t auth-service:<tag> .
 #
+# Dockerfile.workspace.dockerignore beside this file keeps local env files and
+# node_modules out of the context. The .dockerignore in this folder does not
+# apply here: the context is the monorepo root, not this folder.
+#
 # This replaces the standalone Dockerfile for any build after auth-service began
 # depending on workspace packages. `npm ci` cannot resolve `workspace:*`, so the
 # old file only works while every @baseworks dependency comes from the registry.
