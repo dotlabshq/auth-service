@@ -148,6 +148,8 @@ organisations.
 | `AUTH_DEV_MODE` | `1` to sign in with a password instead of the IdP — [dev mode](#dev-mode-a-password-instead-of-an-identity-provider); never in production |
 | `AUTH_DEV_USER` · `AUTH_DEV_PASSWORD` | The dev account; default `admin` and a password made up at boot |
 | `AUTH_SESSION_SECRET` | Key for the session cookie's signature; defaults to one derived from `JWT_SECRET`, else `AUTH_SIGNING_KEY` |
+| `OIDC_IDPS` | `name:idp-id,name:idp-id` — the IdPs `/login/:idp` can go straight to; names are what a login page puts in its URL, ids are the provider's |
+| `OIDC_ORG_ID` | Optional: the provider organization whose login settings apply to `/login/:idp` |
 | `OIDC_*`, `APP_PUBLIC_URL`, `IAM_SERVICE_URL`, `KV_CACHE_URL` | Unchanged |
 
 Base64 is accepted for key material because environment variables, Kubernetes
@@ -203,10 +205,32 @@ Routes live at the service root. Behind a gateway the realm is reached at
 |---|---|
 | `GET /healthz` · `GET /.well-known/service` · `GET /.well-known/jwks.json` | Discovery, unauthenticated |
 | `GET /login` · `/oidc/callback` · `/session` · `/token` | Browser sign-in |
+| `GET /login/:idp` · `GET /idps` | Sign in straight with a named IdP; the names configured — [below](#signing-in-straight-with-an-idp) |
 | `POST /login` | Dev mode only: the password form posts here |
 | `GET /logout` · `POST /logout` | Sign out by navigation (redirects to `returnTo`), or by `fetch()` (204) |
 | `GET /start` · `GET /poll/:state` · `POST /approve` | CLI device flow |
 | `POST /service-token` · `POST /exchange` | Tokens that are not a browser login |
+
+### Signing in straight with an IdP
+
+A product can keep its own login page, on its own domain, with "Continue with
+Google" on it, and the person never sees the provider's login screens. The
+button links to `/v1/auth/login/google?returnTo=…`; auth sends the authorize
+request with the provider's IdP hint scope (`urn:zitadel:iam:org:idp:id:<id>`),
+the provider hands over to Google at once, and the way back is the ordinary
+`/oidc/callback`. The provider still owns the user, the session and account
+linking.
+
+- `GET /idps` answers `{ "idps": ["google", "github"] }`, so the page draws its
+  buttons from configuration. Names only; the provider's ids stay in config.
+- An unknown name answers `404 unknown_idp` rather than falling back to the
+  provider's own screen.
+- No `prompt` is sent: the IdP shows its own account chooser.
+- `OIDC_ORG_ID` pins the organization whose login settings apply. On the
+  provider side, creating a user on first sign-in needs that organization to
+  allow registration.
+- Plain `/login` is unchanged, and in dev mode every `/login/:idp` lands on the
+  dev form.
 
 ### The CLI flow, and the one mistake clients make
 

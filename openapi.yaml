@@ -140,6 +140,58 @@ paths:
         "401": { description: "Wrong user or password; the form again, as HTML" }
         "404": { description: Not in dev mode }
 
+  /login/{idp}:
+    get:
+      tags: [browser]
+      summary: Begin sign-in straight with a named IdP
+      description: |
+        Same PKCE, `returnTo` and callback as `GET /login`, but the authorize
+        request carries the provider's IdP hint scope for the IdP configured
+        under this name (`OIDC_IDPS`), so the provider's own login screens are
+        skipped. No `prompt` is sent. In dev mode this answers the dev form.
+      security: []
+      parameters:
+        - name: idp
+          in: path
+          required: true
+          schema: { type: string, example: google }
+          description: A name listed by `GET /idps`
+        - $ref: "#/components/parameters/ReturnTo"
+      responses:
+        "200":
+          description: Dev mode only — the password form, which posts to `POST /login`
+          content:
+            text/html:
+              schema: { type: string }
+        "302": { description: Redirect to the identity provider, with the IdP hint }
+        "404":
+          description: No IdP is configured under this name
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string, example: unknown_idp }
+                  message: { type: string }
+  /idps:
+    get:
+      tags: [browser]
+      summary: The IdPs a login page can offer
+      description: Names only; the provider's ids are configuration and are not published.
+      security: []
+      responses:
+        "200":
+          description: Configured IdP names, in configuration order
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [idps]
+                properties:
+                  idps:
+                    type: array
+                    items: { type: string }
+                    example: [google, github]
   /oidc/callback:
     get:
       tags: [browser]

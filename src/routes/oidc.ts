@@ -1,4 +1,4 @@
-import { Hono } from 'hono'
+import { Hono, type Context } from 'hono'
 import { getCookie } from 'hono/cookie'
 import { generatePkce, buildOidcAuthUrl } from '@baseworks/auth/pkce'
 import {
@@ -13,6 +13,7 @@ import { tokenPage } from '../pages/token.js'
 import { returnOrigins, safeReturnTo } from '../lib/return-to.js'
 import { DEV_ISSUER, DEV_SESSION_SECONDS, devCredentialsMatch, type DevLogin } from '../lib/dev.js'
 import { devLoginPage } from '../pages/dev-login.js'
+import { idpScopes, parseIdps } from '../lib/idps.js'
 
 /**
  * Decode a JWT's payload segment. No signature check: the id_token was just
@@ -49,6 +50,9 @@ function getConfig(env: Record<string, string | undefined>) {
     // else lands on `/` — see lib/return-to.ts.
     returnOrigins: returnOrigins(env),
     isProd:       env['NODE_ENV'] === 'production',
+    // Sign-in straight with a named IdP — see lib/idps.ts.
+    idps:         parseIdps(env['OIDC_IDPS']),
+    orgId:        (env['OIDC_ORG_ID'] ?? '').trim() || undefined,
   }
 }
 
@@ -148,6 +152,32 @@ export function oidcRouter(opts: OidcRouterOptions = {}) {
   const app = new Hono()
   const dev = opts.dev ?? null
 
+  /**
+   * Send the browser to the IdP with a fresh PKCE pair, remembering where to
+   * come back to. `/login` and `/login/:idp` differ only in what they ask for.
+   */
+  async function redirectToIdp(
+    c: Context,
+    cfg: ReturnType<typeof getConfig>,
+    redirectTo: string,
+    ask: { prompt?: 'select_account'; scopes: string[] },
+  ) {
+    const pkce    = await generatePkce()
+    const authUrl = buildOidcAuthUrl({
+      issuer:      cfg.issuer,
+      clientId:    cfg.clientId,
+      redirectUri: `${cfg.appUrl}/oidc/callback`,
+      challenge:   pkce.challenge,
+      ...(ask.prompt ? { prompt: ask.prompt } : {}),
+      scopes:      ask.scopes,
+    })
+
+    const opts = cookieOpts(cfg.isProd, cfg.cookieDomain) + '; Max-Age=600'
+    c.header('Set-Cookie', `${COOKIE_PKCE}=${pkce.verifier}; ${opts}`, { append: true })
+    c.header('Set-Cookie', `${COOKIE_RETURN_TO}=${encodeURIComponent(redirectTo)}; ${opts}`, { append: true })
+    return c.redirect(authUrl)
+  }
+
   // GET /login
   app.get('/login', async (c) => {
     const cfg        = getConfig(process.env as Record<string, string | undefined>)
@@ -158,21 +188,30 @@ export function oidcRouter(opts: OidcRouterOptions = {}) {
     // Dev mode: no IdP to go to. The form carries the return address itself.
     if (dev) return c.html(devLoginPage({ returnTo: redirectTo }))
 
-    const pkce       = await generatePkce()
+    return redirectToIdp(c, cfg, redirectTo, { prompt: 'select_account', scopes: cfg.scope })
+  })
 
-    const authUrl = buildOidcAuthUrl({
-      issuer:      cfg.issuer,
-      clientId:    cfg.clientId,
-      redirectUri: `${cfg.appUrl}/oidc/callback`,
-      challenge:   pkce.challenge,
-      prompt:      'select_account',
-      scopes:      cfg.scope,
-    })
+  // GET /idps — the names a product's login page can offer buttons for. Names
+  // only: the provider's ids are configuration, not something to publish.
+  app.get('/idps', (c) => {
+    const cfg = getConfig(process.env as Record<string, string | undefined>)
+    return c.json({ idps: [...cfg.idps.keys()] })
+  })
 
-    const opts = cookieOpts(cfg.isProd, cfg.cookieDomain) + '; Max-Age=600'
-    c.header('Set-Cookie', `${COOKIE_PKCE}=${pkce.verifier}; ${opts}`, { append: true })
-    c.header('Set-Cookie', `${COOKIE_RETURN_TO}=${encodeURIComponent(redirectTo)}; ${opts}`, { append: true })
-    return c.redirect(authUrl)
+  // GET /login/:idp — straight to one IdP, past the provider's own screens.
+  // No `prompt`: the IdP shows its own account chooser where it has one.
+  app.get('/login/:idp', async (c) => {
+    const cfg        = getConfig(process.env as Record<string, string | undefined>)
+    const redirectTo = safeReturnTo(requestedReturn(c), cfg.returnOrigins)
+
+    // Dev mode has no IdP at all, so every button lands on the same form —
+    // a product's login page works on a laptop without a provider.
+    if (dev) return c.html(devLoginPage({ returnTo: redirectTo }))
+
+    const idpId = cfg.idps.get(c.req.param('idp').toLowerCase())
+    if (!idpId) return c.json({ error: 'unknown_idp', message: 'No such sign-in provider is configured' }, 404)
+
+    return redirectToIdp(c, cfg, redirectTo, { scopes: [...cfg.scope, ...idpScopes(idpId, cfg.orgId)] })
   })
 
   // POST /login — dev mode only: the form above posts here.
