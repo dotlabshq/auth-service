@@ -56,6 +56,7 @@ never draws a page. A route that would do both is two routes.
 - Deliberately left alone: `/service-token`, `/exchange`, and what a
   `type: 'service'` token may skip. The operator will decide those separately
   (workspace ADR 0003 §5).
+- `/exchange-key` (2.3.0): an API token (`bwt_…`) for a realm token of at most five minutes, after iam says it is live (`src/lib/iam.ts` `iamVerify`). Nothing is minted without iam's yes; every dead token is one answer, `invalid_token`; a revoked token works until the realm token ends. The claim set is fixed: add nothing from iam's answer to it.
 - Still to come, in 3.0: remove the deprecated navigations under `/api`.
 
 ## The rules
@@ -92,7 +93,7 @@ src/routes/oidc.ts    signinRouter: /login/sso /login/:idp /oidc/callback /logou
                       startSession() — the one place a sign-in becomes a session
 src/routes/cli.ts     API  /start /poll/:state /approve — the `bw login` device
                       flow; approveCli() — the one place a terminal gets a token
-src/routes/tokens.ts  API  /service-token /exchange
+src/routes/tokens.ts  API  /service-token /exchange /exchange-key
 src/pages/layout.ts   view() (language, theme, brand), layout(), respond()
 src/pages/strings.ts  every sentence the pages show, en and tr
 src/pages/login.ts    the sign-in page       src/pages/cli.ts  the approval pages

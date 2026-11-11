@@ -19,11 +19,14 @@ import { Hono } from 'hono'
 import { timingSafeEqual } from 'node:crypto'
 import { verifier } from '@baseworks/auth/identity'
 import { mintIdentityToken } from '../lib/mint.js'
+import { iamVerify } from '../lib/iam.js'
 import { realm } from '../lib/realm.js'
 
 /** Ceiling for both kinds. Short by design: neither is meant to be carried around. */
 const MAX_TTL = 3600
 const DEFAULT_TTL = 3600
+/** What an API token is exchanged for lives this long at most: a revoked one works that long. */
+const EXCHANGE_TTL = 300
 
 /**
  * `AUTH_SERVICE_CLIENTS=zone9-api:secret1,billing:secret2`
@@ -128,6 +131,60 @@ export function tokensRouter() {
         // auth deals in identity and knows nothing about orgs.
         ...(body.org_id ? { org_id: body.org_id } : {}),
         ...(body.scope ? { scope: body.scope } : {}),
+      },
+    })
+    if (!token) return c.json({ error: 'realm has no signing key configured' }, 500)
+
+    return c.json({ token, token_type: 'bearer', expires_in: expiresIn })
+  })
+
+  /**
+   * POST /exchange-key — an API token (`bwt_…`) for a realm token (workspace
+   * ADR 0004 §7).
+   *
+   * The API token is long-lived, opaque and revocable: right for the outside,
+   * wrong for passing between services. The first service that receives one
+   * sends it here; iam says whether it is live and what it stands for; this
+   * mints a realm token that lives at most five minutes (and never past the API
+   * token) saying the same. Services go on verifying JWTs and learn nothing
+   * about API tokens. The cost, said plainly: a revoked API token keeps working
+   * for as long as a realm token minted before the revocation lives, up to five
+   * minutes.
+   *
+   * No Authorization header: the token in the body is the credential. Every way
+   * a token can be dead is one answer (`invalid_token`); nothing is minted
+   * unless iam said yes.
+   */
+  app.post('/exchange-key', async (c) => {
+    const body = (await c.req.json().catch(() => null)) as { token?: unknown } | null
+    const given = typeof body?.token === 'string' ? body.token : ''
+    if (!given.startsWith('bwt_')) return c.json({ error: 'invalid_token' }, 401)
+
+    const verdict = await iamVerify(given)
+    if (verdict.status === 'unconfigured') return c.json({ error: 'exchange_unavailable' }, 503)
+    if (verdict.status === 'unavailable') return c.json({ error: 'iam_unavailable' }, 502)
+    if (verdict.status === 'invalid') return c.json({ error: 'invalid_token' }, 401)
+
+    const p = verdict.principal
+    const remaining = p.expires_at === null ? EXCHANGE_TTL : Math.floor((p.expires_at - Date.now()) / 1000)
+    if (remaining < 1) return c.json({ error: 'invalid_token' }, 401)
+    const expiresIn = Math.min(EXCHANGE_TTL, remaining)
+
+    const token = await mintIdentityToken({
+      sub: p.actor_id,
+      // `assistant` for every kind: a verifier from before ADR 0004 must never
+      // read this as a person who signed in.
+      type: 'assistant',
+      expiresInSeconds: expiresIn,
+      claims: {
+        kind: p.kind,
+        via: p.kind === 'machine' ? 'key' : 'token',
+        actor: p.actor,
+        credential_id: p.token_id,
+        ...(p.on_behalf_of ? { on_behalf_of: p.on_behalf_of } : {}),
+        ...(p.role ? { role: p.role } : {}),
+        ...(p.org_id ? { org_id: p.org_id } : {}),
+        ...(p.access ? { access: p.access } : {}),
       },
     })
     if (!token) return c.json({ error: 'realm has no signing key configured' }, 500)

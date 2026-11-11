@@ -91,6 +91,7 @@ export function createApp(opts: AppOptions) {
           'cli-device-flow',
           'service-token',
           'token-exchange',
+          'api-token-exchange',
           // A product can send people to this service's own sign-in page
           // rather than drawing one.
           'login-page',

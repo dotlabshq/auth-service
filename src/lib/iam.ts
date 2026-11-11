@@ -63,3 +63,66 @@ export async function iamSync(id: OidcIdentity): Promise<string | null> {
   const { user } = (await res.json().catch(() => ({}))) as { user?: { id?: string } }
   return user?.id ?? null
 }
+
+/** What iam says a verified API token stands for (`/_/tokens/verify`, workspace ADR 0004). */
+export interface VerifiedPrincipal {
+  token_id: string
+  kind: 'human' | 'agent' | 'machine'
+  actor: string
+  actor_id: string
+  org_id: string | null
+  expires_at: number | null
+  on_behalf_of?: string
+  access?: Array<'read' | 'write'>
+  role?: string
+}
+
+export type Verification =
+  | { status: 'ok'; principal: VerifiedPrincipal }
+  | { status: 'invalid' }
+  | { status: 'unavailable' }
+  | { status: 'unconfigured' }
+
+const text = (v: unknown): v is string => typeof v === 'string' && v.length > 0
+
+/**
+ * Ask iam whether an API token (`bwt_…`) is live and what it stands for.
+ *
+ * `/_` is on iam's own address: `IAM_BASE_PATH` belongs to the published API
+ * and is not used here. One answer for every way a token can be dead (unknown,
+ * revoked, expired, an agent suspended or removed): `invalid`. iam not
+ * answering, answering 5xx, or answering something that is not a principal is
+ * `unavailable`: never a reason to let a token through.
+ */
+export async function iamVerify(apiToken: string): Promise<Verification> {
+  const url = (process.env['IAM_SERVICE_URL'] ?? '').replace(/\/+$/, '')
+  if (!url) return { status: 'unconfigured' }
+  const service = await mintIdentityToken({ sub: serviceName(), type: 'service', expiresInSeconds: 60 })
+  if (!service) return { status: 'unavailable' }
+  const res = await fetch(`${url}/_/tokens/verify`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${service}` },
+    body: JSON.stringify({ token: apiToken }),
+  }).catch(() => null)
+  if (!res) return { status: 'unavailable' }
+  if (res.status === 401) return { status: 'invalid' }
+  if (!res.ok) return { status: 'unavailable' }
+  const p = ((await res.json().catch(() => null)) as { principal?: Record<string, unknown> } | null)?.principal
+  if (!p || !text(p['token_id']) || !text(p['actor']) || !text(p['actor_id'])) return { status: 'unavailable' }
+  const kind = p['kind']
+  if (kind !== 'human' && kind !== 'agent' && kind !== 'machine') return { status: 'unavailable' }
+  const org_id = text(p['org_id']) ? p['org_id'] : null
+  const expires_at = typeof p['expires_at'] === 'number' ? p['expires_at'] : null
+  const access = Array.isArray(p['access']) ? (p['access'].filter((a) => a === 'read' || a === 'write') as Array<'read' | 'write'>) : undefined
+  if (kind === 'agent' && !text(p['on_behalf_of'])) return { status: 'unavailable' }
+  if (kind === 'machine' && (!text(p['role']) || !org_id)) return { status: 'unavailable' }
+  return {
+    status: 'ok',
+    principal: {
+      token_id: p['token_id'], kind, actor: p['actor'], actor_id: p['actor_id'], org_id, expires_at,
+      ...(kind === 'agent' ? { on_behalf_of: p['on_behalf_of'] as string } : {}),
+      ...(kind === 'machine' ? { role: p['role'] as string } : {}),
+      ...(access ? { access } : {}),
+    },
+  }
+}

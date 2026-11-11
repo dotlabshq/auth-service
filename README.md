@@ -63,6 +63,7 @@ arbitrary subject. What replaced those uses is narrower:
 |---|---|---|
 | A service acting as itself | `POST /service-token` | Subject is the authenticated client; it cannot be chosen |
 | An assistant or CI job | `POST /exchange` | Same subject as the caller, one org, at most an hour |
+| An API token (`bwt_…`) arriving at a service | `POST /exchange-key` | A realm token of at most five minutes saying what iam says the token is: a person, an agent for a person, or an organization's key |
 | Acting as another user | — | Not offered. Grant the *service* the permission instead |
 
 ## Using it from your app
@@ -332,6 +333,22 @@ is under `/api`.
 | `GET /v1/auth/idps` | The IdP names configured |
 | `GET /v1/auth/start` · `GET /v1/auth/poll/:state` · `POST /v1/auth/approve` | CLI device flow |
 | `POST /v1/auth/service-token` · `POST /v1/auth/exchange` | Tokens that are not a browser login |
+| `POST /v1/auth/exchange-key` | An API token (`bwt_…`) for a realm token (below) |
+
+### Exchanging an API token (2.3.0)
+
+`POST /api/exchange-key { token: "bwt_…" }` — no Authorization header; the token
+is the credential. auth asks iam (`<IAM_SERVICE_URL>/_/tokens/verify`, with a
+60-second service token of its own; `IAM_BASE_PATH` is not used for this
+internal call) and mints a realm token that lives `min(300, seconds until the API
+token expires)`: `sub` is the actor id, `type: assistant` for every kind,
+`kind`, `actor`, `credential_id`, `via` (`token`, or `key` for a machine),
+`on_behalf_of` (agent), `role` (machine), `org_id` when bound, `access` when iam
+answered one. Anything not a `bwt_` token, and every way a token can be dead, is
+`401 invalid_token`; iam unreachable or wrong is `502 iam_unavailable`; no
+`IAM_SERVICE_URL` is `503 exchange_unavailable`. **A revoked API token keeps
+working for up to five minutes**, as long as a realm token minted before it
+lives. `@baseworks/auth` 2.2.0 calls this from `requireAuth` (`AUTH_URL`).
 
 ### Upgrading from 1.x
 

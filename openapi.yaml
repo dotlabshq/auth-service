@@ -415,6 +415,53 @@ paths:
         "401": { description: Missing or invalid token }
         "403": { description: The presented token is not a human token }
 
+  /exchange-key:
+    post:
+      tags: [tokens]
+      summary: Exchange an API token for a realm token
+      security: []
+      description: |
+        An API token (`bwt_…`, issued by iam-service) is long-lived, opaque and
+        revocable: right for the outside, wrong for passing between services. The
+        first service that receives one calls this; auth asks iam
+        (`<IAM_SERVICE_URL>/_/tokens/verify`, as itself) whether it is live and
+        what it stands for, and answers with a realm token (workspace ADR 0004
+        §7).
+
+        **No Authorization header:** the token in the body is the credential. A
+        body that is not a `bwt_` token is `401` without asking iam.
+
+        The realm token lives `min(300, seconds until the API token expires)`
+        seconds and says: `sub` (the actor id), `type: assistant` (for every kind,
+        so a verifier from before ADR 0004 never reads it as a person who signed
+        in), `kind`, `actor`, `credential_id`, `via` (`token`; `key` for a
+        machine), `on_behalf_of` (agent), `role` (machine), `org_id` when the
+        credential is bound to one, and `access` when iam answered one (including
+        `[]`). Nothing else from iam's answer goes into it.
+
+        **A revoked API token keeps working for up to five minutes**: as long as a
+        realm token minted before the revocation lives. A service that wants
+        revocation at once does not remember the exchange (`AUTH_EXCHANGE_CACHE=off`
+        in `@baseworks/auth`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string, description: "An API token, `bwt_…`" }
+      responses:
+        "200":
+          description: Issued
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenResponse" }
+        "401": { description: "`invalid_token`: not an API token, unknown, revoked, expired, or an agent that is suspended or removed (one answer for all of them)" }
+        "502": { description: "`iam_unavailable`: iam did not answer, answered an error, or answered something that is not a principal. Nothing is ever minted without iam's yes" }
+        "503": { description: "`exchange_unavailable`: this realm has no IAM_SERVICE_URL" }
+
 components:
   parameters:
     ReturnTo:
