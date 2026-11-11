@@ -1,7 +1,6 @@
-import { Hono } from 'hono'
+import { createApp } from '../app.js'
 import { encodeSession } from '../lib/cookies.js'
-import { cliRouter } from '../routes/cli.js'
-import { oidcRouter, type OidcRouterOptions } from '../routes/oidc.js'
+import type { OidcRouterOptions } from '../routes/oidc.js'
 
 export const JWT_SECRET = 'test-secret-32-chars-long-enough!'
 // Set at import time: a test may build a cookie before createTestApp() runs,
@@ -40,9 +39,10 @@ export async function createTestApp(opts: OidcRouterOptions = {}) {
 
   const kv = new InMemoryKv()
 
-  const app = new Hono()
-  app.route('/', oidcRouter(opts))
-  app.route('/', cliRouter(kv as never))
+  // The whole service, mounted as it runs: pages at the root, the API under
+  // `/api`. A test asks for a path the way the process sees it, after the
+  // gateway has replaced its prefix.
+  const app = createApp({ dev: opts.dev, kv: kv as never })
 
   function req(method: string, path: string, o: {
     body?: unknown

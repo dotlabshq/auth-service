@@ -17,7 +17,7 @@ beforeEach(async () => {
 
 describe('GET /start — initiate CLI auth flow', () => {
   it('returns state, url, and expires_in', async () => {
-    const res = await app.get('/start')
+    const res = await app.get('/api/start')
     expect(res.status).toBe(200)
     const body = await json<{ state: string; url: string; expires_in: number }>(res)
     expect(typeof body.state).toBe('string')
@@ -27,7 +27,7 @@ describe('GET /start — initiate CLI auth flow', () => {
   })
 
   it('stores pending status in KV', async () => {
-    const res  = await app.get('/start')
+    const res  = await app.get('/api/start')
     const { state } = await json<{ state: string }>(res)
     const raw = await app.kv.get(`auth:cli:${state}`)
     expect(raw).not.toBeNull()
@@ -35,8 +35,8 @@ describe('GET /start — initiate CLI auth flow', () => {
   })
 
   it('each call produces a unique state', async () => {
-    const a = await json<{ state: string }>(await app.get('/start'))
-    const b = await json<{ state: string }>(await app.get('/start'))
+    const a = await json<{ state: string }>(await app.get('/api/start'))
+    const b = await json<{ state: string }>(await app.get('/api/start'))
     expect(a.state).not.toBe(b.state)
   })
 })
@@ -45,25 +45,25 @@ describe('GET /start — initiate CLI auth flow', () => {
 
 describe('GET /poll/:state — check CLI auth status', () => {
   it('returns pending for a fresh state', async () => {
-    const { state } = await json<{ state: string }>(await app.get('/start'))
-    const res = await app.get(`/poll/${state}`)
+    const { state } = await json<{ state: string }>(await app.get('/api/start'))
+    const res = await app.get(`/api/poll/${state}`)
     expect(res.status).toBe(200)
     const { status } = await json<{ status: string }>(res)
     expect(status).toBe('pending')
   })
 
   it('returns expired for unknown state', async () => {
-    const res = await app.get('/poll/no-such-state')
+    const res = await app.get('/api/poll/no-such-state')
     expect(res.status).toBe(200)
     const { status } = await json<{ status: string }>(res)
     expect(status).toBe('expired')
   })
 
   it('returns done + token and clears KV when approved', async () => {
-    const { state } = await json<{ state: string }>(await app.get('/start'))
+    const { state } = await json<{ state: string }>(await app.get('/api/start'))
     await app.kv.set(`auth:cli:${state}`, JSON.stringify({ status: 'done', token: 'test-jwt' }))
 
-    const res = await app.get(`/poll/${state}`)
+    const res = await app.get(`/api/poll/${state}`)
     expect(res.status).toBe(200)
     const body = await json<{ status: string; token?: string }>(res)
     expect(body.status).toBe('done')
@@ -78,7 +78,7 @@ describe('GET /poll/:state — check CLI auth status', () => {
 
 describe('auth is login-only — no org endpoints', () => {
   it('POST /token-for-org no longer exists (404, not 500)', async () => {
-    const res = await app.post('/token-for-org', { org_id: 'org-1' })
+    const res = await app.post('/api/token-for-org', { org_id: 'org-1' })
     expect(res.status).toBe(404)
   })
 })
@@ -99,8 +99,8 @@ describe('session cookie codec — non-Latin-1 names', () => {
     expect(decodeSession(raw)).toEqual(session)
   })
 
-  it('/session returns the decoded name intact', async () => {
-    const res = await app.get('/session', { cookie: `${SESSION_COOKIE_NAME}=${encodeSession(session)}` })
+  it('/api/session returns the decoded name intact', async () => {
+    const res = await app.get('/api/session', { cookie: `${SESSION_COOKIE_NAME}=${encodeSession(session)}` })
     expect(res.status).toBe(200)
     expect((await json<{ name: string }>(res)).name).toBe('İsmail Demirbilek')
   })
@@ -122,7 +122,7 @@ describe('session cookie codec — non-Latin-1 names', () => {
 
 describe('GET /session — browser session check', () => {
   it('returns 401 when no session cookie', async () => {
-    const res = await app.get('/session')
+    const res = await app.get('/api/session')
     expect(res.status).toBe(401)
     expect((await json<{ is_authenticated: boolean }>(res)).is_authenticated).toBe(false)
   })
@@ -136,7 +136,7 @@ describe('GET /session — browser session check', () => {
       issuer: 'https://auth.test',
       expiresAt: Math.floor(Date.now() / 1000) + 3600,
     })
-    const res = await app.get('/session', { cookie: `${SESSION_COOKIE_NAME}=${cookie}` })
+    const res = await app.get('/api/session', { cookie: `${SESSION_COOKIE_NAME}=${cookie}` })
     expect(res.status).toBe(200)
 
     // The body is snake_case (ADR-043); the cookie keeps its own shape, so
@@ -153,13 +153,13 @@ describe('GET /session — browser session check', () => {
   })
 
   it('returns 401 for invalid/malformed session cookie', async () => {
-    const res = await app.get('/session', { cookie: 'auth_session=not-base64-json' })
+    const res = await app.get('/api/session', { cookie: 'auth_session=not-base64-json' })
     expect(res.status).toBe(401)
   })
 
   it('returns 401 for unauthenticated session cookie', async () => {
     const cookie = makeSessionCookie({ isAuthenticated: false })
-    const res = await app.get('/session', { cookie: `${SESSION_COOKIE_NAME}=${cookie}` })
+    const res = await app.get('/api/session', { cookie: `${SESSION_COOKIE_NAME}=${cookie}` })
     expect(res.status).toBe(401)
   })
 })
@@ -174,8 +174,8 @@ describe('POST /approve answers its caller in kind', () => {
   }
 
   it('JSON in, JSON out — and the token goes to the CLI, not to the page', async () => {
-    const { state } = await json<{ state: string }>(await app.get('/start'))
-    const res = await app.post('/approve', { state }, { cookie: `${SESSION_COOKIE_NAME}=${makeSessionCookie(session)}` })
+    const { state } = await json<{ state: string }>(await app.get('/api/start'))
+    const res = await app.post('/api/approve', { state }, { cookie: `${SESSION_COOKIE_NAME}=${makeSessionCookie(session)}` })
 
     // A redirect here would hand a fetch() a page of HTML instead of an answer.
     expect(res.status).toBe(200)
@@ -184,14 +184,14 @@ describe('POST /approve answers its caller in kind', () => {
     expect(body).not.toHaveProperty('token')
 
     // The waiting CLI is the one that collects it.
-    const poll = await json<{ status: string; token?: string }>(await app.get(`/poll/${state}`))
+    const poll = await json<{ status: string; token?: string }>(await app.get(`/api/poll/${state}`))
     expect(poll.status).toBe('done')
     expect(poll.token).toBeTypeOf('string')
   })
 
   it('a form post still gets the redirect a browser needs', async () => {
-    const { state } = await json<{ state: string }>(await app.get('/start'))
-    const res = await app.postForm('/approve', `state=${state}`, {
+    const { state } = await json<{ state: string }>(await app.get('/api/start'))
+    const res = await app.postForm('/api/approve', `state=${state}`, {
       cookie: `${SESSION_COOKIE_NAME}=${makeSessionCookie(session)}`,
     })
     expect(res.status).toBe(302)
@@ -200,7 +200,7 @@ describe('POST /approve answers its caller in kind', () => {
 
 // ─── the session cookie must be unforgeable ───────────────────────
 //
-// `/token` and `/approve` mint a realm identity token for whoever the cookie
+// `/api/token` and `/api/approve` mint a realm identity token for whoever the cookie
 // names. While the cookie was plain base64, anyone who could reach this service
 // could name any user and be issued a token as them — no password, no identity
 // provider. These tests are the guard on that.
@@ -215,22 +215,22 @@ describe('a hand-built session cookie is not a session', () => {
   }
 
   it('GET /session refuses it', async () => {
-    const res = await app.get('/session', { cookie: `${SESSION_COOKIE_NAME}=${makeForgedSessionCookie(claim)}` })
+    const res = await app.get('/api/session', { cookie: `${SESSION_COOKIE_NAME}=${makeForgedSessionCookie(claim)}` })
     expect(res.status).toBe(401)
   })
 
   it('GET /token mints nothing from it', async () => {
-    const res = await app.get('/token', { cookie: `${SESSION_COOKIE_NAME}=${makeForgedSessionCookie(claim)}` })
+    const res = await app.get('/api/token', { cookie: `${SESSION_COOKIE_NAME}=${makeForgedSessionCookie(claim)}` })
     expect(res.status).toBe(401)
   })
 
   it('POST /approve does not hand a CLI a token for the named user', async () => {
-    const { state } = await json<{ state: string }>(await app.get('/start'))
-    const res = await app.post('/approve', { state }, { cookie: `${SESSION_COOKIE_NAME}=${makeForgedSessionCookie(claim)}` })
+    const { state } = await json<{ state: string }>(await app.get('/api/start'))
+    const res = await app.post('/api/approve', { state }, { cookie: `${SESSION_COOKIE_NAME}=${makeForgedSessionCookie(claim)}` })
     expect(res.status).toBe(401)
 
     // And the waiting CLI is still waiting, not holding someone else's identity.
-    const poll = await json<{ status: string }>(await app.get(`/poll/${state}`))
+    const poll = await json<{ status: string }>(await app.get(`/api/poll/${state}`))
     expect(poll.status).toBe('pending')
   })
 })
@@ -246,7 +246,7 @@ describe('GET /token — mints a JWT from the session (no database)', () => {
       expiresAt: Math.floor(Date.now() / 1000) + 3600,
       userId: 'sub-xyz',
     })
-    const res = await app.get('/token', { cookie: `${SESSION_COOKIE_NAME}=${cookie}` })
+    const res = await app.get('/api/token', { cookie: `${SESSION_COOKIE_NAME}=${cookie}` })
     expect(res.status).toBe(200)
     const { token } = await json<{ token: string }>(res)
     const claims = verifyHs256Jwt(token, process.env['JWT_SECRET']!)
@@ -262,7 +262,7 @@ describe('GET /token — mints a JWT from the session (no database)', () => {
       expiresAt: Math.floor(Date.now() / 1000) + 3600,
       userId: 'iam-user-1',
     })
-    const res = await app.get('/token', { cookie: `${SESSION_COOKIE_NAME}=${cookie}` })
+    const res = await app.get('/api/token', { cookie: `${SESSION_COOKIE_NAME}=${cookie}` })
     expect(res.status).toBe(200)
     const { token } = await json<{ token: string }>(res)
     const claims = verifyHs256Jwt(token, process.env['JWT_SECRET']!)
@@ -271,7 +271,7 @@ describe('GET /token — mints a JWT from the session (no database)', () => {
   })
 
   it('returns 401 without a session', async () => {
-    const res = await app.get('/token')
+    const res = await app.get('/api/token')
     expect(res.status).toBe(401)
   })
 })
@@ -280,7 +280,7 @@ describe('GET /token — mints a JWT from the session (no database)', () => {
 
 describe('routing', () => {
   it('does not 500 on unknown routes', async () => {
-    const res = await app.get('/no-such-route')
+    const res = await app.get('/api/no-such-route')
     expect(res.status).not.toBe(500)
   })
 })

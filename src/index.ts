@@ -1,92 +1,15 @@
 import { serve } from '@hono/node-server'
-import { Hono } from 'hono'
-import { logger } from 'hono/logger'
 import { createEnv } from '@baseworks/sdk'
 import type { Redis } from 'ioredis'
 import { kvAdapter, memoryKvAdapter } from './db/client.js'
 import type { KvClient } from './db/client.js'
-import { oidcRouter } from './routes/oidc.js'
-import { cliRouter } from './routes/cli.js'
-import { tokensRouter } from './routes/tokens.js'
-import { iamEnabled } from './lib/iam.js'
-import { realm } from './lib/realm.js'
 import { devBanner, devLogin } from './lib/dev.js'
-import { serviceManifest } from '@baseworks/core/service'
-import { readFileSync } from 'node:fs'
-
-// Read once at startup: the release is a build-time fact, and re-reading it per
-// request would turn a manifest fetch into disk I/O.
-const VERSION = (() => {
-  try {
-    return (JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as
-      { version?: string }).version ?? '0.0.0'
-  } catch {
-    return '0.0.0'
-  }
-})()
+import { publicUrls } from './lib/urls.js'
+import { createApp } from './app.js'
 
 // Dev mode is decided once, at boot: the password is made up here and must stay
 // the same for the life of the process. Throws under NODE_ENV=production.
 const dev = devLogin()
-
-const app = new Hono()
-app.use('*', logger())
-app.get('/healthz', (c) => c.json({
-  ok: true, service: 'auth-service', iam: iamEnabled(), ...(dev ? { dev: true } : {}),
-}))
-
-// The contract itself. Served from the repo file so the document and the code
-// ship together and cannot drift apart between releases.
-app.get('/openapi.yaml', (c) => {
-  try {
-    const spec = readFileSync(new URL('../openapi.yaml', import.meta.url), 'utf8')
-    return c.body(spec, 200, { 'content-type': 'application/yaml; charset=utf-8' })
-  } catch {
-    return c.json({ error: 'spec not bundled with this build' }, 404)
-  }
-})
-
-// What this service is and what contract it speaks. Unauthenticated: it carries
-// no secrets, and its readers include the gateway and a CLI that has not signed
-// in yet (ADR-042 §8 in the zone9 repo).
-app.get('/.well-known/service', async (c) => {
-  const r = await realm()
-  return c.json(
-    serviceManifest({
-      name: 'auth',
-      version: VERSION,
-      // Bumped only when the HTTP surface breaks callers, not on every release.
-      api_version: '1.0',
-      openapi_url: '/openapi.yaml',
-      capabilities: [
-        // A client can tell a dev realm from a real one without guessing.
-        dev ? 'dev-login' : 'oidc-login',
-        'cli-device-flow',
-        'service-token',
-        'token-exchange',
-        // Consumers branch on this: with no signing key the realm still issues
-        // HS256 and there is nothing at the JWKS endpoint to verify against.
-        ...(r.jwks ? ['jwks'] : []),
-        ...(iamEnabled() ? ['iam-sync'] : []),
-      ],
-    }),
-  )
-})
-
-// The realm's public keys. Unauthenticated on purpose: every verifier in the
-// realm — and the gateway — reads this, and it contains only public material.
-// Cached hard because the key changes about as often as the domain does; jose
-// refetches on its own when it meets a `kid` it does not know.
-app.get('/.well-known/jwks.json', async (c) => {
-  const r = await realm()
-  if (!r.jwks) {
-    // No signing key: the realm is still on the shared HS256 secret. An empty
-    // set is the honest answer — "this issuer publishes no verifiable keys" —
-    // and it keeps verifiers from caching a 404 as if it were a key set.
-    return c.json({ keys: [] }, 200, { 'cache-control': 'no-store' })
-  }
-  return c.json(r.jwks, 200, { 'cache-control': 'public, max-age=3600' })
-})
 
 // auth owns NO database — identity + org management belong to IAM (ADR-006/007).
 // It resolves only a cache (OIDC/CLI transient state) through the broker
@@ -148,21 +71,14 @@ try {
   kv = memoryKvAdapter()
 }
 
-app.route('/', oidcRouter({ dev }))
-app.route('/', cliRouter(kv))
-app.route('/', tokensRouter())
-
-app.onError((err, c) => {
-  console.error(err)
-  return c.json({ error: 'Internal server error' }, 500)
-})
+const app = createApp({ dev, kv, log: true })
 
 const port = parseInt(process.env['PORT'] ?? '3000')
 
 serve({ fetch: app.fetch, port }, () => {
   console.log(`auth-service listening on :${port}`)
   if (dev) {
-    const base = (process.env['APP_PUBLIC_URL'] ?? `http://localhost:${port}`).replace(/\/+$/, '')
-    console.warn(devBanner(dev, `${base}/v1/auth/login`))
+    const urls = publicUrls()
+    console.warn(devBanner(dev, urls.origin ? urls.ui('/login') : `http://localhost:${port}/login`))
   }
 })

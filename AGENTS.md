@@ -19,6 +19,20 @@ is what consumers share** — `requireAuth`, the verifier, the CLI login command
 A second place that signs people in is a bug, which is why the package's
 Next.js session modules were removed in its 1.0.0.
 
+## Two surfaces
+
+**Pages at the root, the API under `/api`.** A gateway publishes them at `/auth`
+and `/v1/auth`. A page answers HTML or a redirect and never JSON; an API route
+never draws a page. A route that would do both is two routes.
+
+- A new screen: a function in `src/pages/` drawn with `layout()`, a route in
+  `src/routes/pages.ts` sent with `respond()`. Nothing else.
+- A new endpoint: under `/api`, in `openapi.yaml`, snake_case.
+- **Never write `/auth` or `/v1/auth` in code.** Addresses the browser follows
+  come from `publicUrls()` (`src/lib/urls.ts`), which reads configuration. The
+  version in `/v1/auth` is the gateway's; a `/v2` must not need a change here.
+- `/healthz` stays at the root and is not published.
+
 ## The rules
 
 1. **auth never persists user or org data.** Its only state is the cache
@@ -44,22 +58,33 @@ Next.js session modules were removed in its 1.0.0.
 ## Where things are
 
 ```
-src/index.ts          wiring: boot (dev mode, cache ping), discovery, routers
-src/routes/oidc.ts    /login /oidc/callback /session /logout /token;
+src/index.ts          boot: dev mode, the cache and its ping, listen
+src/app.ts            createApp() — the two surfaces assembled; discovery
+src/routes/pages.ts   PAGES  /login (page, dev form) /cli /cli/approve /cli/done
+src/routes/oidc.ts    signinRouter: /login/sso /login/:idp /oidc/callback /logout
+                        (pages; mounted again under /api, deprecated)
+                      sessionRouter: API  /session /token /idps POST /logout
                       startSession() — the one place a sign-in becomes a session
-src/routes/cli.ts     /start /poll/:state /approve — the `bw login` device flow
-src/routes/tokens.ts  /service-token /exchange
+src/routes/cli.ts     API  /start /poll/:state /approve — the `bw login` device
+                      flow; approveCli() — the one place a terminal gets a token
+src/routes/tokens.ts  API  /service-token /exchange
+src/pages/layout.ts   the frame every page is drawn in; respond() and its headers
+src/pages/login.ts    the sign-in page       src/pages/cli.ts  the approval pages
+src/lib/urls.ts       where the gateway publishes us — every public address
+src/lib/brand.ts      what the pages look like, from AUTH_UI_*
 src/lib/realm.ts      signing keys, issuer, audience, JWKS
 src/lib/mint.ts       mintIdentityToken — every token goes through it
 src/lib/cookies.ts    cookie names, the signed session codec
 src/lib/return-to.ts  what returnTo may be
 src/lib/dev.ts        dev mode: the account, the production refusal
 src/lib/iam.ts        POST /sync client
-src/pages/            the approval page and the dev sign-in form
 ```
 
 ## Contracts you must not break
 
+- **What is published under `/v1/auth`.** Every caller outside reaches the API
+  there; 2.0 moved the mount and changed none of those addresses. The
+  deprecated navigations under `/api` stay until 3.0.
 - **The token's claim set and the JWKS.** Every service in the realm verifies
   with `@baseworks/auth/hono`; a claim renamed here is an outage there.
 - **`/start` → `/poll` semantics.** `bw` polls until `expires_in`; an unknown
@@ -77,7 +102,9 @@ pnpm test     # vitest; routers over an in-memory KV, no Redis, IdP or IAM neede
 pnpm build    # tests, then tsup
 ```
 
-Tests go through the routers with real requests (`src/__tests__/setup.ts`).
+Tests go through `createApp()` with real requests (`src/__tests__/setup.ts`),
+asking for paths as the process sees them: `/login`, `/api/session`.
+`surfaces.test.ts` states the split itself.
 A rule about what the service accepts is tested through the route, not only
 through the helper — a helper tested alone is how `?returnTo=` went unread for
 a whole release while `safeReturnTo` had full coverage.

@@ -6,7 +6,17 @@ A realm is one deployment of this plane: one auth-service, one signing key pair,
 and the services that trust it. A token issued here is accepted by every service
 in that realm and by no other.
 
-**In the local realm:** port 3003, published by the gateway at `/v1/auth`.
+It has two surfaces, and they do not overlap:
+
+| | Inside the service | Published by a gateway at | For |
+|---|---|---|---|
+| **Pages** | `/` — `/login`, `/cli` | `/auth` — `/auth/login` | a person in a browser |
+| **API** | `/api` — `/api/session`, `/api/token` | `/v1/auth` — `/v1/auth/session` | a program |
+
+The gateway replaces the prefix; the service never names `/auth` or `/v1` in
+its code and learns them from configuration ([Mounting](#mounting)).
+
+**In the local realm:** port 3003, pages at `/auth`, the API at `/v1/auth`.
 From the workspace root: `just start auth` · `just logs auth` · `just restart auth`.
 See the workspace [README](../../README.md) for the whole map and
 [AGENTS.md](../../AGENTS.md) for the rules every service here follows.
@@ -94,7 +104,7 @@ addAuthCommands(program, {
 ```
 $ mycli login
   Approve this sign-in in your browser:
-  https://auth.example.com/v1/auth/token?state=dd6c62cb…
+  https://auth.example.com/auth/cli?state=dd6c62cb…
   Waiting for approval — the link is valid for 10m…
 ✓ Logged in.
 
@@ -143,14 +153,19 @@ organisations.
 | `AUTH_AUDIENCE` | Realm name; defaults to the issuer's hostname |
 | `AUTH_SERVICE_CLIENTS` | `name:secret,name:secret` for `/service-token` |
 | `JWT_SECRET` | **Legacy.** HS256, accepted while set — see below |
-| `AUTH_CLI_APPROVE_URL` | Where `/start` sends a person to approve a CLI sign-in; defaults to this service's own page |
+| `APP_PUBLIC_URL` | The origin the browser is on; behind a gateway, the gateway's |
+| `AUTH_UI_PATH` · `AUTH_API_PATH` | Where the gateway publishes the pages and the API; default `/auth` and `/v1/auth` — [Mounting](#mounting) |
+| `OIDC_REDIRECT_URI` | The `redirect_uri` handed to the provider; defaults to `APP_PUBLIC_URL` + `AUTH_UI_PATH` + `/oidc/callback` |
+| `AUTH_UI_NAME` · `AUTH_UI_LOGO_URL` · `AUTH_UI_HOME_URL` | The product's name and mark on every page, and where they link |
+| `AUTH_UI_TERMS_URL` · `AUTH_UI_PRIVACY_URL` · `AUTH_UI_ACCENT` | The legal links under every page; the button colour (`#rgb` or `#rrggbb`) |
+| `AUTH_CLI_APPROVE_URL` | Where `/start` sends a person to approve a CLI sign-in; defaults to this service's own page, `/auth/cli` |
 | `AUTH_RETURN_ORIGINS` | Extra origins `returnTo` may point at, comma-separated; `APP_PUBLIC_URL` is always allowed |
 | `AUTH_DEV_MODE` | `1` to sign in with a password instead of the IdP — [dev mode](#dev-mode-a-password-instead-of-an-identity-provider); never in production |
 | `AUTH_DEV_USER` · `AUTH_DEV_PASSWORD` | The dev account; default `admin` and a password made up at boot |
 | `AUTH_SESSION_SECRET` | Key for the session cookie's signature; defaults to one derived from `JWT_SECRET`, else `AUTH_SIGNING_KEY` |
-| `OIDC_IDPS` | `name:idp-id,name:idp-id` — the IdPs `/login/:idp` can go straight to; names are what a login page puts in its URL, ids are the provider's |
+| `OIDC_IDPS` | `name:idp-id,name:idp-id` — the buttons on the sign-in page, and what `/login/:idp` can go straight to; ids are the provider's and are never published. `sso` is not a name an IdP can have |
 | `OIDC_ORG_ID` | Optional: the provider organization whose login settings apply to `/login/:idp` |
-| `OIDC_*`, `APP_PUBLIC_URL`, `IAM_SERVICE_URL`, `KV_CACHE_URL` | Unchanged |
+| `OIDC_*`, `IAM_SERVICE_URL`, `KV_CACHE_URL` | Unchanged |
 
 Base64 is accepted for key material because environment variables, Kubernetes
 Secrets and CI variables all mangle the newlines a PEM needs.
@@ -174,7 +189,7 @@ gets committed, backed up and copied. The key id is derived from the key itself
 
 ### The session cookie is signed, and that has a cost
 
-`oidc_session` carries an HMAC tag, because `/token` and `/approve` mint a
+`oidc_session` carries an HMAC tag, because `/api/token` and the CLI approval mint a
 token for whoever it names. The key comes from `AUTH_SESSION_SECRET` if set,
 else from `JWT_SECRET`, else from `AUTH_SIGNING_KEY` — so **changing whichever
 of those is in use signs every browser out once**. Rotating the signing key and
@@ -194,47 +209,147 @@ Order matters, and each step is safe on its own:
 4. Move anything that was *minting* with the secret onto `/service-token`.
 5. Remove `JWT_SECRET` everywhere. Only then is the issuing power actually gone.
 
-## Endpoints
+## Mounting
 
-Full contract: [`openapi.yaml`](./openapi.yaml), also served at `/openapi.yaml`.
+The service mounts **pages at its root** and **the API under `/api`**. A gateway
+publishes the first at `/auth` and the second at `/v1/auth`, replacing the
+prefix each time:
 
-Routes live at the service root. Behind a gateway the realm is reached at
-`/v1/auth/...`, with that prefix stripped before the request arrives.
+```toml
+# flect.toml — see flect.example.toml
+expose = [
+  { path = "/auth" },                    # /auth/login       -> /login
+  { path = "/v1/auth", to = "/api" },    # /v1/auth/session  -> /api/session
+]
+```
+
+```
+# Caddy
+handle /auth/* {
+	uri strip_prefix /auth
+	reverse_proxy 127.0.0.1:3003
+}
+handle /v1/auth/* {
+	uri strip_prefix /v1/auth
+	rewrite * /api{uri}
+	reverse_proxy 127.0.0.1:3003
+}
+```
+
+Why two mounts and not one: a page and an API call are different promises. A
+page is an address to send a browser to and may change how it looks tomorrow;
+an API route is a contract. Keeping them apart means a new screen never
+collides with an endpoint, and the gateway can publish, version or protect each
+on its own terms. **The version lives in the gateway.** `/v2/auth` can point at
+another deployment, or at this same `/api`, without a release here.
+
+A redirect, a form action and the OIDC `redirect_uri` are addresses the browser
+follows, so they must be the published ones. The service builds them from
+`APP_PUBLIC_URL`, `AUTH_UI_PATH` and `AUTH_API_PATH` and from nothing else. Run
+alone on a port, with no gateway: `AUTH_UI_PATH=` (empty) and
+`AUTH_API_PATH=/api`.
+
+A service that calls auth **inside** the cluster reaches the process itself,
+with no gateway in between, so it names the mount: `<AUTH_SERVICE_URL>/api/session`.
+
+`/healthz` is on neither surface. It is for the platform that runs the process
+and should not be published.
+
+## Pages
+
+| Published | In the service | |
+|---|---|---|
+| `/auth/login` | `GET /login` | **The sign-in page.** A button per IdP in `OIDC_IDPS`, "Other sign-in options" for the provider's own screens, and a plain sentence when a sign-in failed (`?error=`). Someone already signed in is sent straight on to `returnTo`. In dev mode it is the password form |
+| `/auth/login/sso` | `GET /login/sso` | Off to the provider's own sign-in |
+| `/auth/login/google` | `GET /login/:idp` | Off to one IdP, past the provider's screens — [below](#signing-in-straight-with-an-idp) |
+| `/auth/oidc/callback` | `GET /oidc/callback` | Back from the provider. Register this as the redirect URI |
+| `/auth/logout` | `GET /logout` | Sign out by navigation, then on to `returnTo`; `?sso=1` also ends the provider's session |
+| `/auth/cli?state=…` | `GET /cli` · `POST /cli/approve` · `GET /cli/done` | Approve a terminal's sign-in |
+
+Send a person to `/auth/login?returnTo=<where they were going>`. `returnTo` is a
+path, or an absolute URL on an origin the realm publishes (`APP_PUBLIC_URL`,
+`AUTH_RETURN_ORIGINS`); anything else becomes `/`.
+
+The pages are server-rendered HTML with the stylesheet inline: no script, no
+build step, nothing fetched from elsewhere. Every one is drawn by
+`src/pages/layout.ts`, so the next screen (an account page, a consent screen) is
+one function and one route in `src/routes/pages.ts`. They are sent with a policy
+that forbids framing and script, and are never cached.
+
+A product may still draw its own login page and link its buttons to
+`/auth/login/<idp>`; `GET /v1/auth/idps` lists the names.
+
+## API
+
+Full contract: [`openapi.yaml`](./openapi.yaml), also served at
+`/v1/auth/openapi.yaml`. Paths below are as published; inside the service each
+is under `/api`.
 
 | | |
 |---|---|
-| `GET /healthz` · `GET /.well-known/service` · `GET /.well-known/jwks.json` | Discovery, unauthenticated |
-| `GET /login` · `/oidc/callback` · `/session` · `/token` | Browser sign-in |
-| `GET /login/:idp` · `GET /idps` | Sign in straight with a named IdP; the names configured — [below](#signing-in-straight-with-an-idp) |
-| `POST /login` | Dev mode only: the password form posts here |
-| `GET /logout` · `POST /logout` | Sign out by navigation (redirects to `returnTo`), or by `fetch()` (204) |
-| `GET /start` · `GET /poll/:state` · `POST /approve` | CLI device flow |
-| `POST /service-token` · `POST /exchange` | Tokens that are not a browser login |
+| `GET /v1/auth/.well-known/service` · `/.well-known/jwks.json` · `/openapi.yaml` | Discovery, unauthenticated |
+| `GET /v1/auth/session` · `GET /v1/auth/token` · `POST /v1/auth/logout` | The browser session: is there one, a token for it, end it (204) |
+| `GET /v1/auth/idps` | The IdP names configured |
+| `GET /v1/auth/start` · `GET /v1/auth/poll/:state` · `POST /v1/auth/approve` | CLI device flow |
+| `POST /v1/auth/service-token` · `POST /v1/auth/exchange` | Tokens that are not a browser login |
+
+### Upgrading from 1.x
+
+2.0 moves where things are mounted. What a caller **outside** reaches at
+`/v1/auth/...` is unchanged, so consoles, products and `bw` keep working; what
+changes is the gateway rule and three addresses.
+
+1. **Gateway.** `/v1/auth` must now be replaced with `/api`, not stripped, and
+   `/auth` must be published (stripped). With a strip-only rule the API answers
+   404. On flect this needs the expose list with `to`; until the broker has it,
+   stay on 1.x.
+2. **Redirect URI.** The default is now `<origin>/auth/oidc/callback`. Add it to
+   the OIDC app, or set `OIDC_REDIRECT_URI` to the old address until you have.
+   Both callbacks are served.
+3. **Internal callers.** A service using `AUTH_SERVICE_URL` directly calls
+   `/api/session`, `/api/token`, `/api/idps` — the root no longer answers them.
+
+Still served under `/v1/auth`, deprecated, and removed in 3.0 — the sign-in
+navigations at their old addresses:
+
+| Old | Now |
+|---|---|
+| `GET /v1/auth/login` | still starts a sign-in at the provider; send people to the page, `/auth/login` |
+| `GET /v1/auth/login/:idp` | `/auth/login/:idp` |
+| `GET /v1/auth/oidc/callback` | `/auth/oidc/callback` |
+| `GET /v1/auth/logout` | `/auth/logout` |
+| `GET /v1/auth/token?state=…` | redirects to `/auth/cli?state=…` |
+
+One behaviour changed on purpose: a sign-in that fails at the callback now lands
+on the sign-in page with the reason. It used to go to `/v1/auth/login`, which
+was itself a redirect to the provider, so a refusal looped into another attempt.
 
 ### Signing in straight with an IdP
 
 A product can keep its own login page, on its own domain, with "Continue with
-Google" on it, and the person never sees the provider's login screens. The
-button links to `/v1/auth/login/google?returnTo=…`; auth sends the authorize
-request with the provider's IdP hint scope (`urn:zitadel:iam:org:idp:id:<id>`),
-the provider hands over to Google at once, and the way back is the ordinary
-`/oidc/callback`. The provider still owns the user, the session and account
-linking.
+Google" on it — or use this service's page, which does the same — and the
+person never sees the provider's login screens. The button links to
+`/auth/login/google?returnTo=…`; auth sends the authorize request with the
+provider's IdP hint scope (`urn:zitadel:iam:org:idp:id:<id>`), the provider
+hands over to Google at once, and the way back is the ordinary
+`/auth/oidc/callback`. The provider still owns the user, the session and
+account linking.
 
-- `GET /idps` answers `{ "idps": ["google", "github"] }`, so the page draws its
-  buttons from configuration. Names only; the provider's ids stay in config.
+- `GET /v1/auth/idps` answers `{ "idps": ["google", "github"] }`, so a page
+  draws its buttons from configuration. Names only; the provider's ids stay in
+  config.
 - An unknown name answers `404 unknown_idp` rather than falling back to the
   provider's own screen.
 - No `prompt` is sent: the IdP shows its own account chooser.
 - `OIDC_ORG_ID` pins the organization whose login settings apply. On the
   provider side, creating a user on first sign-in needs that organization to
   allow registration.
-- Plain `/login` is unchanged, and in dev mode every `/login/:idp` lands on the
-  dev form.
+- In dev mode every one of these lands on the dev form.
 
 ### The CLI flow, and the one mistake clients make
 
-`/start` returns a handle and the URL to approve; poll `/poll/{state}` until it
+`/start` returns a handle and the URL to approve (the page, `/auth/cli?state=…`,
+unless `AUTH_CLI_APPROVE_URL` names a console's own screen); poll `/poll/{state}` until it
 answers `done`. Poll until exactly `expires_in` and no longer — a shorter client
 timeout reports failure while the link still works. An unknown handle and an
 expired one both answer `expired`, because from the client's side they mean the
@@ -251,7 +366,7 @@ everyone out to tidy up a field name.
 
 ## Known gaps
 
-- **No revocation.** A token is valid until it expires; `/logout` clears cookies
+- **No revocation.** A token is valid until it expires; signing out clears cookies
   only. Every token carries a `jti` so a deny list can be added without a format
   change.
 - **Login state lives in the cache.** With no `KV_CACHE_URL` the service falls
@@ -270,12 +385,12 @@ pnpm build   # tsup
 ### Dev mode: a password instead of an identity provider
 
 A realm on a laptop should not need a Zitadel project before anyone can open
-the console. Set `AUTH_DEV_MODE=1` and `/login` becomes a username/password
-form; the account is printed when the service starts:
+the console. Set `AUTH_DEV_MODE=1` and the sign-in page becomes a
+username/password form; the account is printed when the service starts:
 
 ```
   auth-service: DEV MODE — no identity provider, password sign-in
-    sign in at  http://localhost:8080/v1/auth/login
+    sign in at  http://localhost:8080/auth/login
     user        admin
     password    1cbbrmMplLFHRcmp
 ```
@@ -287,7 +402,9 @@ path — the same signed session, the same identity token, the same IAM `/sync`
 `urn:baseworks:dev` + the username, so with IAM present it keeps one user id,
 and its memberships, across restarts.
 
-In dev mode `/oidc/callback` answers 404 and `/logout?sso=1` is a local logout.
+In dev mode `/oidc/callback` answers 404, `/logout?sso=1` is a local logout,
+and every other way into a sign-in (`/login/sso`, `/login/:idp`, the deprecated
+`/v1/auth/login`) redirects to the form.
 **Under `NODE_ENV=production` the service refuses to start** with
 `AUTH_DEV_MODE` set: a realm entered with a password from an env var has no
 identity provider, and that must never be one flag away from production.

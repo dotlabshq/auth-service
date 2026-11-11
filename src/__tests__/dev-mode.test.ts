@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { createTestApp, SESSION_COOKIE_NAME } from './setup.js'
 import { DEV_ISSUER, devCredentialsMatch, devLogin, type DevLogin } from '../lib/dev.js'
-import { tokenPage } from '../pages/token.js'
+import { cliApprovePage } from '../pages/cli.js'
 
 const saved = { ...process.env }
 afterEach(() => { process.env = { ...saved } })
@@ -63,19 +63,19 @@ describe('signing in with the dev account', () => {
     expect(cookie).toContain(`${SESSION_COOKIE_NAME}=`)
     expect(cookie).toContain('oidc_token=')
 
-    const session = await (await app.get('/session', { cookie })).json() as Record<string, unknown>
+    const session = await (await app.get('/api/session', { cookie })).json() as Record<string, unknown>
     expect(session).toMatchObject({ is_authenticated: true, subject: 'admin', issuer: DEV_ISSUER, user_id: 'admin' })
 
-    const token = await app.get('/token', { cookie })
+    const token = await app.get('/api/token', { cookie })
     expect(token.status).toBe(200)
   })
 
   it('a dev session approves a waiting CLI like any other', async () => {
     const signedIn = await app.postForm('/login', form({ username: 'admin', password: 'correct horse' }))
-    const { state } = await (await app.get('/start')).json() as { state: string }
-    const res = await app.post('/approve', { state }, { cookie: cookieFrom(signedIn) })
+    const { state } = await (await app.get('/api/start')).json() as { state: string }
+    const res = await app.post('/api/approve', { state }, { cookie: cookieFrom(signedIn) })
     expect(res.status).toBe(200)
-    expect(((await (await app.get(`/poll/${state}`)).json()) as { status: string }).status).toBe('done')
+    expect(((await (await app.get(`/api/poll/${state}`)).json()) as { status: string }).status).toBe('done')
   })
 
   it('a wrong pair gets the form again, and no cookie', async () => {
@@ -105,8 +105,9 @@ describe('outside dev mode', () => {
 
 describe('the approval page', () => {
   it('echoes the state it was given as text, never as markup', () => {
-    const html = tokenPage('"><script>alert(1)</script>')
+    const html = cliApprovePage({ state: '"><script>alert(1)</script>', who: '<b>ada</b>' })
     expect(html).not.toContain('<script>alert(1)')
     expect(html).toContain('&quot;&gt;&lt;script&gt;')
+    expect(html).toContain('&lt;b&gt;ada&lt;/b&gt;')
   })
 })

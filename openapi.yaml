@@ -5,9 +5,23 @@ info:
   description: |
     The realm's sign-in gate and its only token issuer.
 
-    **Mounting.** Routes live at the service root. Behind a gateway the realm is
-    reached at `/v1/auth/...`, with that prefix stripped before the request
-    arrives — so `/start` here is `https://<host>/v1/auth/start` in public.
+    **Mounting.** This document is the API: what a program calls. The service
+    mounts it under `/api`, and a gateway publishes that at `/v1/auth`,
+    replacing the prefix — so `/start` here is `/api/start` inside the service
+    and `https://<host>/v1/auth/start` in public. The version in the public
+    address is the gateway's to choose; the service does not know it.
+
+    **Pages are not in this document.** What a person sees lives at the service
+    root, which a gateway publishes at `/auth`: `/auth/login` (the sign-in
+    page), `/auth/login/{idp}` and `/auth/login/sso` (off to the provider),
+    `/auth/oidc/callback`, `/auth/logout`, `/auth/cli` (approve a terminal).
+    They answer HTML and redirects, never JSON, and they are addresses to send
+    a browser to, not a contract to call. The routes below tagged `browser`
+    and marked deprecated are those same navigations at the addresses they had
+    before 2.0; they keep working through 2.x and are removed in 3.0.
+
+    `/healthz` is on neither surface: it is for the platform that runs the
+    process and is not published.
 
     **Field names are `snake_case`** (ADR-043), which the OAuth2 fields here —
     `token_type`, `expires_in`, `client_id` — already were.
@@ -27,37 +41,22 @@ info:
 servers:
   - url: https://auth.example.com/v1/auth
     description: Behind a gateway
-  - url: http://127.0.0.1:3003
+  - url: http://127.0.0.1:3003/api
     description: Direct, for local development
 
 tags:
   - name: discovery
     description: Unauthenticated; readers include the gateway and signed-out clients
+  - name: session
+    description: The browser session, as a program asks about it
   - name: browser
-    description: The OIDC sign-in flow a browser walks through
+    description: Deprecated — sign-in navigations at their pre-2.0 addresses; the pages are at `/auth`
   - name: cli
     description: Browser-approved sign-in for a command line
   - name: tokens
     description: Tokens that are not a browser login
 
 paths:
-  /healthz:
-    get:
-      tags: [discovery]
-      summary: Liveness
-      security: []
-      responses:
-        "200":
-          description: ok
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  ok: { type: boolean }
-                  service: { type: string }
-                  iam: { type: boolean, description: Whether an iam-service is reachable }
-
   /.well-known/service:
     get:
       tags: [discovery]
@@ -103,47 +102,25 @@ paths:
   /login:
     get:
       tags: [browser]
-      summary: Begin OIDC sign-in
+      deprecated: true
+      summary: Begin OIDC sign-in (send people to the page at `/auth/login` instead)
+      description: |
+        Before 2.0 this address started a sign-in, and products link to it. It
+        still does exactly that: a redirect to the identity provider's own
+        sign-in. In dev mode, where there is no provider, it redirects to the
+        sign-in page. New links should go to the page, `/auth/login`, which
+        offers the configured IdPs and says what went wrong when something did.
       security: []
       parameters:
         - $ref: "#/components/parameters/ReturnTo"
       responses:
-        "200":
-          description: Dev mode only — the password form, which posts to `POST /login`
-          content:
-            text/html:
-              schema: { type: string }
-        "302": { description: Redirect to the identity provider }
-    post:
-      tags: [browser]
-      summary: Dev mode only — sign in with the dev account
-      description: |
-        Exists only when the service runs with `AUTH_DEV_MODE=1`, which it
-        refuses under `NODE_ENV=production`; otherwise 404. In dev mode
-        `GET /login` answers this form instead of redirecting to the identity
-        provider. Success sets the same session and identity token an OIDC
-        sign-in does.
-      security: []
-      requestBody:
-        required: true
-        content:
-          application/x-www-form-urlencoded:
-            schema:
-              type: object
-              required: [username, password]
-              properties:
-                username: { type: string }
-                password: { type: string }
-                returnTo: { type: string, description: "Checked like the query parameter on GET" }
-      responses:
-        "302": { description: Signed in; redirect to returnTo }
-        "401": { description: "Wrong user or password; the form again, as HTML" }
-        "404": { description: Not in dev mode }
+        "302": { description: Redirect to the identity provider, or to the sign-in page in dev mode }
 
   /login/{idp}:
     get:
       tags: [browser]
-      summary: Begin sign-in straight with a named IdP
+      deprecated: true
+      summary: Begin sign-in straight with a named IdP (now at `/auth/login/{idp}`)
       description: |
         Same PKCE, `returnTo` and callback as `GET /login`, but the authorize
         request carries the provider's IdP hint scope for the IdP configured
@@ -175,7 +152,7 @@ paths:
                   message: { type: string }
   /idps:
     get:
-      tags: [browser]
+      tags: [session]
       summary: The IdPs a login page can offer
       description: Names only; the provider's ids are configuration and are not published.
       security: []
@@ -195,8 +172,13 @@ paths:
   /oidc/callback:
     get:
       tags: [browser]
-      summary: Identity provider redirect target
+      deprecated: true
+      summary: Identity provider redirect target (now at `/auth/oidc/callback`)
       description: |
+        Served here for a realm whose OIDC app still lists the pre-2.0 redirect
+        URI; pin it with `OIDC_REDIRECT_URI` until the new one is registered.
+        A failure redirects to the sign-in page with `?error=`.
+
         Exchanges the code, resolves the platform identity (registering it with
         iam-service when one is configured), and sets the session cookies plus
         the realm identity token.
@@ -206,7 +188,7 @@ paths:
 
   /session:
     get:
-      tags: [browser]
+      tags: [session]
       summary: The current browser session, if any
       security: []
       responses:
@@ -228,7 +210,8 @@ paths:
   /logout:
     get:
       tags: [browser]
-      summary: Clear this app's cookies, then go somewhere
+      deprecated: true
+      summary: Clear this app's cookies, then go somewhere (now at `/auth/logout`)
       description: |
         For a link or a navigation. Local by default; `sso=1` also ends the
         identity provider's session. Note that an already-issued token stays
@@ -244,7 +227,7 @@ paths:
       responses:
         "302": { description: Redirect }
     post:
-      tags: [browser]
+      tags: [session]
       summary: Clear this app's cookies, for a page that signs out with fetch()
       description: |
         The same local logout as `GET`, answered without a redirect: a page that
@@ -255,25 +238,27 @@ paths:
 
   /token:
     get:
-      tags: [browser, cli]
-      summary: Hand the session's identity token to the caller, or show the CLI approval page
+      tags: [session]
+      summary: Hand the session's identity token to the caller
       description: |
-        With `state` present this renders the approval page for a waiting CLI.
-        Without it, a signed-in browser receives the identity token as JSON.
+        A signed-in browser receives the identity token as JSON.
+
+        Deprecated: with `state` present this used to render the CLI approval
+        page. It now redirects to that page, `/auth/cli?state=…`.
       security: []
       parameters:
         - name: state
           in: query
+          deprecated: true
           schema: { type: string }
-          description: Present for the CLI flow; omit for the browser flow
+          description: A link an older CLI printed; redirects to the approval page
       responses:
         "200":
-          description: The token, or the approval page
+          description: The token
           content:
             application/json:
               schema: { $ref: "#/components/schemas/TokenResponse" }
-            text/html:
-              schema: { type: string }
+        "302": { description: "`state` was given: redirect to the approval page" }
         "401": { description: No session }
         "500": { description: The realm has no way to sign }
 
@@ -333,9 +318,11 @@ paths:
       tags: [cli]
       summary: Approve a waiting CLI sign-in
       description: |
-        Submitted from a signed-in browser — by this service's own approval page
-        as a form, or by a console screen as JSON. The token is in neither
-        answer: it belongs to the waiting CLI, which collects it from `/poll`.
+        Submitted from a signed-in browser by a console that draws its own
+        approval screen, as JSON. (This service's own page, `/auth/cli`, posts
+        its form to the page surface; a form sent here is still taken.) The
+        token is not in the answer: it belongs to the waiting CLI, which
+        collects it from `/poll`.
       security: []
       requestBody:
         required: true

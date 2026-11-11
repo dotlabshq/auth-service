@@ -1,9 +1,7 @@
-import { Hono } from 'hono'
 import { beforeEach, afterEach, describe, expect, it } from 'vitest'
 import { exportPKCS8, generateKeyPair, type JSONWebKeySet } from 'jose'
 import { verifier } from '@baseworks/auth/identity'
-import { cliRouter } from '../routes/cli.js'
-import { oidcRouter } from '../routes/oidc.js'
+import { createApp } from '../app.js'
 import { resetRealm } from '../lib/realm.js'
 import { InMemoryKv, JWT_SECRET, makeSessionCookie, SESSION_COOKIE_NAME } from './setup.js'
 
@@ -15,28 +13,20 @@ async function signingKeyEnv(): Promise<string> {
   return Buffer.from(await exportPKCS8(privateKey)).toString('base64')
 }
 
-/** The two routes that mint tokens, mounted with the environment under test. */
+/** The service as it runs, with the environment under test. */
 function app() {
-  const a = new Hono()
-  a.route('/', oidcRouter())
-  a.route('/', cliRouter(new InMemoryKv() as never))
-  a.get('/.well-known/jwks.json', async (c) => {
-    const { realm } = await import('../lib/realm.js')
-    const r = await realm()
-    return c.json(r.jwks ?? { keys: [] })
-  })
-  return a
+  return createApp({ kv: new InMemoryKv() as never })
 }
 
 /** Drive the CLI device flow to the point where a token is issued. */
-async function approvedToken(a: Hono): Promise<string> {
-  const start = (await (await a.request('/start')).json()) as { state: string }
+async function approvedToken(a: ReturnType<typeof app>): Promise<string> {
+  const start = (await (await a.request('/api/start')).json()) as { state: string }
   const session = makeSessionCookie({
     isAuthenticated: true, subject: 'oidc-sub', userId: 'usr_1',
     email: 'a@b.test', name: 'A', issuer: 'https://idp.test',
     expiresAt: Math.floor(Date.now() / 1000) + 3600,
   })
-  await a.request('/approve', {
+  await a.request('/api/approve', {
     method: 'POST',
     headers: {
       'content-type': 'application/x-www-form-urlencoded',
@@ -44,7 +34,7 @@ async function approvedToken(a: Hono): Promise<string> {
     },
     body: `state=${start.state}`,
   })
-  const done = (await (await a.request(`/poll/${start.state}`)).json()) as { token: string }
+  const done = (await (await a.request(`/api/poll/${start.state}`)).json()) as { token: string }
   return done.token
 }
 
@@ -71,7 +61,7 @@ describe('with a signing key configured', () => {
   })
 
   it('publishes exactly one public key, without the private half', async () => {
-    const res = await app().request('/.well-known/jwks.json')
+    const res = await app().request('/api/.well-known/jwks.json')
     const body = (await res.json()) as JSONWebKeySet
 
     expect(body.keys).toHaveLength(1)
@@ -83,7 +73,7 @@ describe('with a signing key configured', () => {
   it('mints an ES256 token the published key set verifies', async () => {
     const a = app()
     const token = await approvedToken(a)
-    const set = (await (await a.request('/.well-known/jwks.json')).json()) as JSONWebKeySet
+    const set = (await (await a.request('/api/.well-known/jwks.json')).json()) as JSONWebKeySet
 
     const claims = await verifier({ jwks: set, issuer: ISSUER, audience: AUDIENCE })(token)
 
@@ -122,40 +112,20 @@ describe('without a signing key', () => {
   })
 
   it('serves an empty key set rather than a 404', async () => {
-    const res = await app().request('/.well-known/jwks.json')
+    const res = await app().request('/api/.well-known/jwks.json')
     expect(res.status).toBe(200)
     expect(((await res.json()) as JSONWebKeySet).keys).toEqual([])
   })
 })
 
 describe('service manifest', () => {
-  async function manifestApp() {
-    const { serviceManifest } = await import('@baseworks/core/service')
-    const { realm } = await import('../lib/realm.js')
-    const a = new Hono()
-    a.get('/.well-known/service', async (c) => {
-      const r = await realm()
-      return c.json(
-        serviceManifest({
-          name: 'auth',
-          version: '0.3.0',
-          api_version: '1.0',
-          openapi_url: '/openapi.yaml',
-          capabilities: [
-            'oidc-login', 'cli-device-flow', 'service-token', 'token-exchange',
-            ...(r.jwks ? ['jwks'] : []),
-          ],
-        }),
-      )
-    })
-    return a
-  }
+  const manifest = () => app().request('/api/.well-known/service')
 
   it('names the service and its contract, and needs no credentials', async () => {
     process.env['AUTH_SIGNING_KEY'] = await signingKeyEnv()
     resetRealm()
 
-    const res = await (await manifestApp()).request('/.well-known/service')
+    const res = await manifest()
     const body = (await res.json()) as { name: string; api_version: string; capabilities: string[] }
 
     expect(res.status).toBe(200)
@@ -169,7 +139,7 @@ describe('service manifest', () => {
     process.env['JWT_SECRET'] = JWT_SECRET
     resetRealm()
 
-    const res = await (await manifestApp()).request('/.well-known/service')
+    const res = await manifest()
     const body = (await res.json()) as { capabilities: string[] }
 
     expect(body.capabilities).not.toContain('jwks')

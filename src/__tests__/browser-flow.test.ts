@@ -21,24 +21,24 @@ function storedReturn(res: Response): string | undefined {
   return line ? decodeURIComponent(line.split(';')[0]!.slice('oidc_return_to='.length)) : undefined
 }
 
-describe('GET /login remembers where the person was going', () => {
+describe('starting a sign-in remembers where the person was going', () => {
   it('reads ?returnTo=, the name the console, doubletap and openapi.yaml use', async () => {
-    const res = await app.get('/login?returnTo=%2Fentries')
+    const res = await app.get('/login/sso?returnTo=%2Fentries')
     expect(res.status).toBe(302)
     expect(storedReturn(res)).toBe('/entries')
   })
 
   it('keeps an absolute return to another surface this realm publishes', async () => {
-    const res = await app.get(`/login?returnTo=${encodeURIComponent('http://doubletap.localhost:8080/bank')}`)
+    const res = await app.get(`/login/sso?returnTo=${encodeURIComponent('http://doubletap.localhost:8080/bank')}`)
     expect(storedReturn(res)).toBe('http://doubletap.localhost:8080/bank')
   })
 
   it('still reads ?redirectTo= for links written against the old name', async () => {
-    expect(storedReturn(await app.get('/login?redirectTo=%2Freports'))).toBe('/reports')
+    expect(storedReturn(await app.get('/login/sso?redirectTo=%2Freports'))).toBe('/reports')
   })
 
   it('stores `/` for an origin the realm does not publish', async () => {
-    expect(storedReturn(await app.get(`/login?returnTo=${encodeURIComponent('https://evil.example')}`))).toBe('/')
+    expect(storedReturn(await app.get(`/login/sso?returnTo=${encodeURIComponent('https://evil.example')}`))).toBe('/')
   })
 })
 
@@ -53,7 +53,7 @@ describe('logout', () => {
   })
 
   it('POST /logout answers a fetch() with 204 and the cookies cleared', async () => {
-    const res = await app.post('/logout', {})
+    const res = await app.post('/api/logout', {})
     expect(res.status).toBe(204)
     const cleared = res.headers.getSetCookie()
     for (const name of [SESSION_COOKIE_NAME, 'oidc_token']) {
@@ -68,8 +68,8 @@ describe('a session is only as long as the expiry signed inside it', () => {
       isAuthenticated: true, subject: 's', userId: 'usr_1', email: 'a@b.test', name: 'A', issuer: 'i',
       expiresAt: Math.floor(Date.now() / 1000) - 1,
     })
-    expect((await app.get('/session', { cookie: `${SESSION_COOKIE_NAME}=${expired}` })).status).toBe(401)
-    expect((await app.get('/token', { cookie: `${SESSION_COOKIE_NAME}=${expired}` })).status).toBe(401)
+    expect((await app.get('/api/session', { cookie: `${SESSION_COOKIE_NAME}=${expired}` })).status).toBe(401)
+    expect((await app.get('/api/token', { cookie: `${SESSION_COOKIE_NAME}=${expired}` })).status).toBe(401)
   })
 })
 
