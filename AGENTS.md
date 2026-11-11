@@ -33,6 +33,24 @@ never draws a page. A route that would do both is two routes.
   version in `/v1/auth` is the gateway's; a `/v2` must not need a change here.
 - `/healthz` stays at the root and is not published.
 
+## Where things stand (2026-11-11)
+
+- `main` = 2.0.0. `1.x` = 1.1.0, the line every deployed product is still on;
+  a fix for them goes there and is released as 1.1.x.
+- Local realm: on 2.0. `Caddyfile`, `apps/console` and `apps/doubletap` rewrite
+  `/v1/auth` to `/api` and `/auth` to the root. `.env.local` pins
+  `OIDC_REDIRECT_URI` to the pre-2.0 callback until the new one is registered
+  with the provider.
+- flect's local dev (`flect/justfile`) starts this same checkout on :3003; its
+  broker (`AUTH_URL`) and dashboard rewrite have to name `/api`.
+- Not deployed anywhere. Blocked on: flect broker with `expose` `{ path, to }`
+  (clave #161), then each product's `flect.toml` and OIDC redirect URI.
+- Not verified: a full round trip through a real identity provider on 2.0.
+- Deliberately left alone: `/service-token`, `/exchange`, and what a
+  `type: 'service'` token may skip. The operator will decide those separately
+  (workspace ADR 0003 §5).
+- Still to come, in 3.0: remove the deprecated navigations under `/api`.
+
 ## The rules
 
 1. **auth never persists user or org data.** Its only state is the cache

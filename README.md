@@ -17,6 +17,14 @@ The gateway replaces the prefix; the service never names `/auth` or `/v1` in
 its code and learns them from configuration ([Mounting](#mounting)).
 
 **In the local realm:** port 3003, pages at `/auth`, the API at `/v1/auth`.
+
+**Where 2.0 stands (2026-11-11).** `main` is 2.0.0; 1.1.0 is kept on branch
+`1.x` for the deployments still on it. The local realm runs 2.0: `Caddyfile`
+and the console and doubletap rewrites publish both surfaces. Nothing deployed
+runs it yet — clave.one, flect and driptab are on 1.1.0 and move when the
+flect broker accepts the expose list below. The layout is the workspace's
+([ADR 0003](../../docs/adr/0003-service-surfaces.md)); auth is the first
+service on it. See [Upgrading from 1.x](#upgrading-from-1x).
 From the workspace root: `just start auth` · `just logs auth` · `just restart auth`.
 See the workspace [README](../../README.md) for the whole map and
 [AGENTS.md](../../AGENTS.md) for the rules every service here follows.
