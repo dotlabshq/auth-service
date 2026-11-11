@@ -4,10 +4,11 @@ import { brand } from '../lib/brand.js'
 import { publicUrls } from '../lib/urls.js'
 
 /**
- * The rule these tests state: pages live at the service root, the API lives
- * under `/api`, and neither is reachable through the other's mount. A gateway
- * publishes the root at `/auth` and `/api` at `/v1/auth`; the service learns
- * those two addresses from configuration and writes them nowhere in its code.
+ * The rule these tests state: pages live under `/ui`, the API lives under
+ * `/api`, neither is reachable through the other's mount, and the root is not
+ * a surface at all. A gateway publishes `/ui` at `/auth` and `/api` at
+ * `/v1/auth`; the service learns those two addresses from configuration and
+ * writes them nowhere in its code.
  */
 
 type App = Awaited<ReturnType<typeof createTestApp>>
@@ -27,7 +28,7 @@ const session = () => `${SESSION_COOKIE_NAME}=${makeSessionCookie({
 })}`
 const location = (res: Response) => res.headers.get('location')
 
-describe('two surfaces, one process', () => {
+describe('two surfaces and a closed root, one process', () => {
   it('answers the API only under /api', async () => {
     for (const path of ['/session', '/token', '/start', '/idps', '/poll/abc', '/.well-known/jwks.json', '/.well-known/service', '/openapi.yaml']) {
       expect((await app.get(path)).status, `root ${path}`).toBe(404)
@@ -38,22 +39,31 @@ describe('two surfaces, one process', () => {
     expect((await app.post('/approve', {})).status).toBe(404)
   })
 
-  it('draws pages only at the root', async () => {
-    expect((await app.get('/cli/done')).status).toBe(200)
+  it('draws pages only under /ui', async () => {
+    expect((await app.get('/ui/cli/done')).status).toBe(200)
     expect((await app.get('/api/cli/done')).status).toBe(404)
     expect((await app.get('/api/cli?state=' + 'a'.repeat(32))).status).toBe(404)
   })
 
-  it('keeps /healthz for the platform, on neither surface a gateway publishes', async () => {
-    // tokens.test and realm.test mount their own routers; this is the one
-    // place the assembled app is asked.
+  it('publishes nothing at the root: a gateway that strips a prefix to / reaches no page and no API', async () => {
+    for (const path of ['/login', '/login/sso', '/oidc/callback', '/logout', '/cli', '/cli/done', '/']) {
+      expect((await app.get(path)).status, `root ${path}`).toBe(404)
+    }
+  })
+
+  it('keeps /healthz at the root, for the platform and the internal network only', async () => {
+    const res = await app.get('/healthz')
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ ok: true, service: 'auth-service' })
+    // Neither published mount carries it, so no gateway rule can expose it.
+    expect((await app.get('/ui/healthz')).status).toBe(404)
     expect((await app.get('/api/healthz')).status).toBe(404)
   })
 })
 
 describe('GET /login is the sign-in page', () => {
   it('is a page, not a trip to the provider: nothing is started until a button is pressed', async () => {
-    const res = await app.get('/login?returnTo=%2Fentries')
+    const res = await app.get('/ui/login?returnTo=%2Fentries')
     expect(res.status).toBe(200)
     expect(res.headers.get('content-type')).toContain('text/html')
     expect(res.headers.getSetCookie()).toEqual([])
@@ -64,7 +74,7 @@ describe('GET /login is the sign-in page', () => {
 
   it('offers a button per configured IdP, and the provider\'s own sign-in beside them', async () => {
     process.env['OIDC_IDPS'] = 'google:idp-id-google,okta:idp-id-okta'
-    const html = await (await app.get('/login?returnTo=%2Fentries')).text()
+    const html = await (await app.get('/ui/login?returnTo=%2Fentries')).text()
     expect(html).toContain('href="http://localhost/auth/login/google?returnTo=%2Fentries"')
     expect(html).toContain('Continue with Google')
     // A name the page has no mark for still gets its button.
@@ -76,29 +86,29 @@ describe('GET /login is the sign-in page', () => {
   })
 
   it('sends someone already signed in straight to where they were going', async () => {
-    const res = await app.get('/login?returnTo=%2Fentries', { cookie: session() })
+    const res = await app.get('/ui/login?returnTo=%2Fentries', { cookie: session() })
     expect(res.status).toBe(302)
     expect(location(res)).toBe('/entries')
   })
 
   it('carries only a return address the realm publishes', async () => {
-    const html = await (await app.get(`/login?returnTo=${encodeURIComponent('https://evil.example')}`)).text()
+    const html = await (await app.get(`/ui/login?returnTo=${encodeURIComponent('https://evil.example')}`)).text()
     expect(html).not.toContain('evil.example')
     expect(html).toContain('/auth/login/sso?returnTo=%2F"')
   })
 
   it('says what went wrong in its own words, and never echoes the code', async () => {
-    const denied = await (await app.get('/login?error=oidc_denied')).text()
+    const denied = await (await app.get('/ui/login?error=oidc_denied')).text()
     expect(denied).toContain('cancelled or refused')
 
-    const odd = await (await app.get(`/login?error=${encodeURIComponent('<script>alert(1)</script>')}`)).text()
+    const odd = await (await app.get(`/ui/login?error=${encodeURIComponent('<script>alert(1)</script>')}`)).text()
     expect(odd).not.toContain('<script>')
     expect(odd).not.toContain('alert(1)')
     expect(odd).toContain('Something went wrong')
   })
 
   it('cannot be framed, runs no script and is not cached', async () => {
-    const res = await app.get('/login')
+    const res = await app.get('/ui/login')
     const csp = res.headers.get('content-security-policy') ?? ''
     expect(csp).toContain("frame-ancestors 'none'")
     expect(csp).toContain("default-src 'none'")
@@ -110,7 +120,7 @@ describe('GET /login is the sign-in page', () => {
     process.env['AUTH_UI_NAME'] = 'clave <one>'
     process.env['AUTH_UI_TERMS_URL'] = '/terms'
     process.env['AUTH_UI_PRIVACY_URL'] = 'javascript:alert(1)'
-    const html = await (await app.get('/login')).text()
+    const html = await (await app.get('/ui/login')).text()
     expect(html).toContain('Sign in to clave &lt;one&gt;')
     expect(html).toContain('href="/terms"')
     expect(html).not.toContain('javascript:')
@@ -120,7 +130,7 @@ describe('GET /login is the sign-in page', () => {
 
 describe('a failed sign-in comes back to the page', () => {
   it('with the reason, and still knowing where the person was headed', async () => {
-    const res = await app.get('/oidc/callback?error=access_denied', { cookie: 'oidc_return_to=%2Fentries' })
+    const res = await app.get('/ui/oidc/callback?error=access_denied', { cookie: 'oidc_return_to=%2Fentries' })
     expect(res.status).toBe(302)
     expect(location(res)).toBe('http://localhost/auth/login?returnTo=%2Fentries&error=oidc_denied')
   })
@@ -164,7 +174,7 @@ describe('addresses from before 2.0 still work, under /api', () => {
   it('in dev mode they land on the form, which is the only way in', async () => {
     const dev = await createTestApp({ dev: { username: 'admin', password: 'pw', generated: false } })
     expect(location(await dev.get('/api/login?returnTo=%2Fentries'))).toBe('http://localhost/auth/login?returnTo=%2Fentries')
-    const form = await (await dev.get('/login?returnTo=%2Fentries')).text()
+    const form = await (await dev.get('/ui/login?returnTo=%2Fentries')).text()
     expect(form).toContain('action="http://localhost/auth/login"')
   })
 })
@@ -180,20 +190,20 @@ describe('approving a terminal, on the page', () => {
 
   it('signs the person in first, then brings them back to the same request', async () => {
     const { state } = await start()
-    const res = await app.get(`/cli?state=${state}`)
+    const res = await app.get(`/ui/cli?state=${state}`)
     expect(res.status).toBe(302)
     expect(location(res)).toBe(`http://localhost/auth/login?returnTo=${encodeURIComponent(`/auth/cli?state=${state}`)}`)
   })
 
   it('says who is approving, and the button hands the waiting CLI its token', async () => {
     const { state } = await start()
-    const page = await app.get(`/cli?state=${state}`, { cookie: session() })
+    const page = await app.get(`/ui/cli?state=${state}`, { cookie: session() })
     expect(page.status).toBe(200)
     const html = await page.text()
     expect(html).toContain('ada@example.test')
     expect(html).toContain('action="http://localhost/auth/cli/approve"')
 
-    const res = await app.postForm('/cli/approve', `state=${state}`, { cookie: session() })
+    const res = await app.postForm('/ui/cli/approve', `state=${state}`, { cookie: session() })
     expect(res.status).toBe(302)
     expect(location(res)).toBe('http://localhost/auth/cli/done')
     expect(await poll(state)).toBe('done')
@@ -201,24 +211,24 @@ describe('approving a terminal, on the page', () => {
 
   it('does not approve without a session', async () => {
     const { state } = await start()
-    const res = await app.postForm('/cli/approve', `state=${state}`)
+    const res = await app.postForm('/ui/cli/approve', `state=${state}`)
     expect(res.status).toBe(302)
     expect(location(res)).toContain('/auth/login?returnTo=')
     expect(await poll(state)).toBe('pending')
   })
 
   it('offers no button for a request that is gone, used, or not one of ours', async () => {
-    const unknown = await app.get(`/cli?state=${'b'.repeat(32)}`, { cookie: session() })
+    const unknown = await app.get(`/ui/cli?state=${'b'.repeat(32)}`, { cookie: session() })
     expect(unknown.status).toBe(404)
     expect(await unknown.text()).not.toContain('<form')
 
     const { state } = await start()
-    await app.postForm('/cli/approve', `state=${state}`, { cookie: session() })
-    const again = await app.get(`/cli?state=${state}`, { cookie: session() })
+    await app.postForm('/ui/cli/approve', `state=${state}`, { cookie: session() })
+    const again = await app.get(`/ui/cli?state=${state}`, { cookie: session() })
     expect(again.status).toBe(409)
     expect(await again.text()).toContain('already approved')
 
-    const odd = await app.get(`/cli?state=${encodeURIComponent('"><script>')}`, { cookie: session() })
+    const odd = await app.get(`/ui/cli?state=${encodeURIComponent('"><script>')}`, { cookie: session() })
     expect(odd.status).toBe(400)
     expect(await odd.text()).not.toContain('<script>')
   })
@@ -240,8 +250,8 @@ describe('where the service is published is configuration', () => {
   })
 
   it('is the service\'s own layout when it runs alone on a port', () => {
-    const u = publicUrls({ APP_PUBLIC_URL: 'http://localhost:3003', AUTH_UI_PATH: '', AUTH_API_PATH: '/api' })
-    expect(u.ui('/login')).toBe('http://localhost:3003/login')
+    const u = publicUrls({ APP_PUBLIC_URL: 'http://localhost:3003', AUTH_UI_PATH: '/ui', AUTH_API_PATH: '/api' })
+    expect(u.ui('/login')).toBe('http://localhost:3003/ui/login')
     expect(u.api('/token')).toBe('http://localhost:3003/api/token')
   })
 
@@ -254,7 +264,7 @@ describe('where the service is published is configuration', () => {
     expect(publicUrls({ APP_PUBLIC_URL: 'https://example.com', OIDC_REDIRECT_URI: pinned }).callback).toBe(pinned)
 
     process.env['OIDC_REDIRECT_URI'] = pinned
-    const u = new URL(location(await app.get('/login/sso'))!)
+    const u = new URL(location(await app.get('/ui/login/sso'))!)
     expect(u.searchParams.get('redirect_uri')).toBe(pinned)
   })
 })

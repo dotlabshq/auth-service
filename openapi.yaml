@@ -11,8 +11,8 @@ info:
     and `https://<host>/v1/auth/start` in public. The version in the public
     address is the gateway's to choose; the service does not know it.
 
-    **Pages are not in this document.** What a person sees lives at the service
-    root, which a gateway publishes at `/auth`: `/auth/login` (the sign-in
+    **Pages are not in this document.** What a person sees lives under `/ui`,
+    which a gateway publishes at `/auth`: `/auth/login` (the sign-in
     page), `/auth/login/{idp}` and `/auth/login/sso` (off to the provider),
     `/auth/oidc/callback`, `/auth/logout`, `/auth/cli` (approve a terminal).
     They answer HTML and redirects, never JSON, and they are addresses to send
@@ -20,8 +20,8 @@ info:
     and marked deprecated are those same navigations at the addresses they had
     before 2.0; they keep working through 2.x and are removed in 3.0.
 
-    `/healthz` is on neither surface: it is for the platform that runs the
-    process and is not published.
+    `/healthz` is on neither surface: it is at the service root, which no
+    gateway rule reaches, for the platform and the internal network.
 
     **Field names are `snake_case`** (ADR-043), which the OAuth2 fields here —
     `token_type`, `expires_in`, `client_id` — already were.

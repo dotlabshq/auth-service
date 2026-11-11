@@ -31,18 +31,23 @@ export interface AppOptions {
 }
 
 /**
- * The service, as two surfaces under one process:
+ * The service, as three mounts under one process:
  *
- *   /        pages — what a person sees: sign in, approve a terminal
+ *   /ui      pages — what a person sees: sign in, approve a terminal
  *   /api     the API — what a program calls: session, tokens, keys, discovery
+ *   /        nothing a gateway publishes: `/healthz`, for the platform that
+ *            runs the process and for services on the same network
  *
- * A gateway publishes the first at `/auth` and the second at `/v1/auth`,
- * replacing the prefix each time. The version in that second address is the
- * gateway's to choose; a `/v2/auth` can point at another deployment, or at
- * this same `/api`, without this service changing.
+ * A gateway publishes `/ui` at `/auth` and `/api` at `/v1/auth`, replacing the
+ * prefix each time. The version in that second address is the gateway's to
+ * choose; a `/v2/auth` can point at another deployment, or at this same `/api`,
+ * without this service changing.
  *
- * `/healthz` is on neither: it is for the platform that runs the process and
- * is not published.
+ * The root is deliberately not a surface. Whatever is mounted there can be
+ * reached only by something that can reach the process itself, which is what
+ * a health check and an internal-only route need and what a published prefix
+ * that is stripped to `/` cannot give (2.0 had the pages at the root, and
+ * `/auth/healthz` answered from outside).
  */
 export function createApp(opts: AppOptions) {
   const dev = opts.dev ?? null
@@ -121,8 +126,11 @@ export function createApp(opts: AppOptions) {
   api.route('/', signinRouter({ dev }))
 
   app.route('/api', api)
-  app.route('/', pagesRouter({ dev, kv: opts.kv }))
-  app.route('/', signin)
+
+  const ui = new Hono()
+  ui.route('/', pagesRouter({ dev, kv: opts.kv }))
+  ui.route('/', signin)
+  app.route('/ui', ui)
 
   app.onError((err, c) => {
     console.error(err)

@@ -13,8 +13,9 @@ import { getConfig, requestedReturn, startSession } from './oidc.js'
 export const FAILED_LOGIN_DELAY_MS = 400
 
 /**
- * The pages: what a person sees. Mounted at the service root, which a gateway
- * publishes at `/auth` — so `/login` here is `https://…/auth/login` outside.
+ * The pages: what a person sees. Mounted under `/ui`, which a gateway
+ * publishes at `/auth` — so `/login` here is `/ui/login` in the process and
+ * `https://…/auth/login` outside.
  *
  * A page never answers with JSON and an API route never draws a page; that is
  * the whole of the split between this router and the ones under `/api`. A new

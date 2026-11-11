@@ -10,16 +10,19 @@ It has two surfaces, and they do not overlap:
 
 | | Inside the service | Published by a gateway at | For |
 |---|---|---|---|
-| **Pages** | `/` — `/login`, `/cli` | `/auth` — `/auth/login` | a person in a browser |
+| **Pages** | `/ui` — `/ui/login`, `/ui/cli` | `/auth` — `/auth/login` | a person in a browser |
 | **API** | `/api` — `/api/session`, `/api/token` | `/v1/auth` — `/v1/auth/session` | a program |
 
 The gateway replaces the prefix; the service never names `/auth` or `/v1` in
-its code and learns them from configuration ([Mounting](#mounting)).
+its code and learns them from configuration ([Mounting](#mounting)). The
+service root is not published at all: `/healthz` lives there, reachable from
+the platform and the internal network only.
 
 **In the local realm:** port 3003, pages at `/auth`, the API at `/v1/auth`.
 
-**Where 2.0 stands (2026-11-11).** `main` is 2.0.0; 1.1.0 is kept on branch
-`1.x` for the deployments still on it. The local realm runs 2.0: `Caddyfile`
+**Where 2.x stands (2026-11-11).** `main` is 2.1.0 (2.0.0 had the pages at the
+root, which left `/auth/healthz` reachable from outside; do not deploy it); 1.1.0 is kept on branch
+`1.x` for the deployments still on it. The local realm runs 2.1: `Caddyfile`
 and the console and doubletap rewrites publish both surfaces. Nothing deployed
 runs it yet — clave.one, flect and driptab are on 1.1.0 and move when the
 flect broker accepts the expose list below. The layout is the workspace's
@@ -219,14 +222,15 @@ Order matters, and each step is safe on its own:
 
 ## Mounting
 
-The service mounts **pages at its root** and **the API under `/api`**. A gateway
+The service mounts **pages under `/ui`** and **the API under `/api`**. A gateway
 publishes the first at `/auth` and the second at `/v1/auth`, replacing the
-prefix each time:
+prefix each time. **Nothing else is published**: the service root holds only
+what the platform and the internal network need (`/healthz`).
 
 ```toml
 # flect.toml — see flect.example.toml
 expose = [
-  { path = "/auth" },                    # /auth/login       -> /login
+  { path = "/auth",    to = "/ui" },     # /auth/login       -> /ui/login
   { path = "/v1/auth", to = "/api" },    # /v1/auth/session  -> /api/session
 ]
 ```
@@ -235,6 +239,7 @@ expose = [
 # Caddy
 handle /auth/* {
 	uri strip_prefix /auth
+	rewrite * /ui{uri}
 	reverse_proxy 127.0.0.1:3003
 }
 handle /v1/auth/* {
@@ -254,18 +259,18 @@ another deployment, or at this same `/api`, without a release here.
 A redirect, a form action and the OIDC `redirect_uri` are addresses the browser
 follows, so they must be the published ones. The service builds them from
 `APP_PUBLIC_URL`, `AUTH_UI_PATH` and `AUTH_API_PATH` and from nothing else. Run
-alone on a port, with no gateway: `AUTH_UI_PATH=` (empty) and
-`AUTH_API_PATH=/api`.
+alone on a port, with no gateway: `AUTH_UI_PATH=/ui` and `AUTH_API_PATH=/api`.
 
 A service that calls auth **inside** the cluster reaches the process itself,
 with no gateway in between, so it names the mount: `<AUTH_SERVICE_URL>/api/session`.
 
-`/healthz` is on neither surface. It is for the platform that runs the process
-and should not be published.
+`/healthz` is on neither surface: it is at the root, which no gateway rule
+reaches. Probe it on the service's own address (`http://auth:3000/healthz`).
+An internal-only route added later goes at the root for the same reason.
 
 ## Pages
 
-| Published | In the service | |
+| Published | In the service (under `/ui`) | |
 |---|---|---|
 | `/auth/login` | `GET /login` | **The sign-in page.** A button per IdP in `OIDC_IDPS`, "Other sign-in options" for the provider's own screens, and a plain sentence when a sign-in failed (`?error=`). Someone already signed in is sent straight on to `returnTo`. In dev mode it is the password form |
 | `/auth/login/sso` | `GET /login/sso` | Off to the provider's own sign-in |
@@ -308,14 +313,14 @@ is under `/api`.
 changes is the gateway rule and three addresses.
 
 1. **Gateway.** `/v1/auth` must now be replaced with `/api`, not stripped, and
-   `/auth` must be published (stripped). With a strip-only rule the API answers
+   `/auth` must be published, replaced with `/ui`. With a strip-only rule the API answers
    404. On flect this needs the expose list with `to`; until the broker has it,
    stay on 1.x.
 2. **Redirect URI.** The default is now `<origin>/auth/oidc/callback`. Add it to
    the OIDC app, or set `OIDC_REDIRECT_URI` to the old address until you have.
    Both callbacks are served.
 3. **Internal callers.** A service using `AUTH_SERVICE_URL` directly calls
-   `/api/session`, `/api/token`, `/api/idps` — the root no longer answers them.
+   `/api/session`, `/api/token`, `/api/idps` — the root answers only `/healthz`.
 
 Still served under `/v1/auth`, deprecated, and removed in 3.0 — the sign-in
 navigations at their old addresses:

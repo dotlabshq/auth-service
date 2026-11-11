@@ -1,17 +1,17 @@
 /**
  * Where the browser and other services reach this service.
  *
- * The service mounts its pages at its own root and its API under `/api`, and
+ * The service mounts its pages under `/ui` and its API under `/api`, and
  * knows nothing about where a gateway publishes either (ADR-042 §4). But a
  * redirect, a form action and the OIDC `redirect_uri` are addresses the
  * *browser* follows, so they have to be the published ones. Those come from
  * configuration and from nowhere else:
  *
  *   APP_PUBLIC_URL   the origin the browser is on          https://example.com
- *   AUTH_UI_PATH     where the gateway publishes `/`       default `/auth`
+ *   AUTH_UI_PATH     where the gateway publishes `/ui`      default `/auth`
  *   AUTH_API_PATH    where the gateway publishes `/api`    default `/v1/auth`
  *
- * Run alone on a port, with no gateway in front: `AUTH_UI_PATH=` (empty) and
+ * Run alone on a port, with no gateway in front: `AUTH_UI_PATH=/ui` and
  * `AUTH_API_PATH=/api`, and every address below is the service's own.
  *
  * With no `APP_PUBLIC_URL` the addresses are root-relative, which a browser

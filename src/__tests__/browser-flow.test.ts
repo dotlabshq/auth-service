@@ -23,32 +23,32 @@ function storedReturn(res: Response): string | undefined {
 
 describe('starting a sign-in remembers where the person was going', () => {
   it('reads ?returnTo=, the name the console, doubletap and openapi.yaml use', async () => {
-    const res = await app.get('/login/sso?returnTo=%2Fentries')
+    const res = await app.get('/ui/login/sso?returnTo=%2Fentries')
     expect(res.status).toBe(302)
     expect(storedReturn(res)).toBe('/entries')
   })
 
   it('keeps an absolute return to another surface this realm publishes', async () => {
-    const res = await app.get(`/login/sso?returnTo=${encodeURIComponent('http://doubletap.localhost:8080/bank')}`)
+    const res = await app.get(`/ui/login/sso?returnTo=${encodeURIComponent('http://doubletap.localhost:8080/bank')}`)
     expect(storedReturn(res)).toBe('http://doubletap.localhost:8080/bank')
   })
 
   it('still reads ?redirectTo= for links written against the old name', async () => {
-    expect(storedReturn(await app.get('/login/sso?redirectTo=%2Freports'))).toBe('/reports')
+    expect(storedReturn(await app.get('/ui/login/sso?redirectTo=%2Freports'))).toBe('/reports')
   })
 
   it('stores `/` for an origin the realm does not publish', async () => {
-    expect(storedReturn(await app.get(`/login/sso?returnTo=${encodeURIComponent('https://evil.example')}`))).toBe('/')
+    expect(storedReturn(await app.get(`/ui/login/sso?returnTo=${encodeURIComponent('https://evil.example')}`))).toBe('/')
   })
 })
 
 describe('logout', () => {
   it('GET /logout returns to the page asked for, and nowhere else', async () => {
-    const ok = await app.get('/logout?returnTo=%2Flogin')
+    const ok = await app.get('/ui/logout?returnTo=%2Flogin')
     expect(ok.status).toBe(302)
     expect(ok.headers.get('location')).toBe('/login')
 
-    const evil = await app.get(`/logout?returnTo=${encodeURIComponent('https://evil.example')}`)
+    const evil = await app.get(`/ui/logout?returnTo=${encodeURIComponent('https://evil.example')}`)
     expect(evil.headers.get('location')).toBe('/')
   })
 

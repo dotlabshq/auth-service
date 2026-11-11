@@ -21,8 +21,8 @@ Next.js session modules were removed in its 1.0.0.
 
 ## Two surfaces
 
-**Pages at the root, the API under `/api`.** A gateway publishes them at `/auth`
-and `/v1/auth`. A page answers HTML or a redirect and never JSON; an API route
+**Pages under `/ui`, the API under `/api`, nothing published at the root.** A
+gateway publishes the first two at `/auth` and `/v1/auth`. A page answers HTML or a redirect and never JSON; an API route
 never draws a page. A route that would do both is two routes.
 
 - A new screen: a function in `src/pages/` drawn with `layout()`, a route in
@@ -31,14 +31,16 @@ never draws a page. A route that would do both is two routes.
 - **Never write `/auth` or `/v1/auth` in code.** Addresses the browser follows
   come from `publicUrls()` (`src/lib/urls.ts`), which reads configuration. The
   version in `/v1/auth` is the gateway's; a `/v2` must not need a change here.
-- `/healthz` stays at the root and is not published.
+- The root is not a surface. `/healthz` is there, and so is any route meant
+  only for services on the same network: no gateway rule can reach it.
 
 ## Where things stand (2026-11-11)
 
-- `main` = 2.0.0. `1.x` = 1.1.0, the line every deployed product is still on;
+- `main` = 2.1.0 (2.0.0 had the pages at the root and so published
+  `/auth/healthz`; superseded, do not deploy). `1.x` = 1.1.0, the line every deployed product is still on;
   a fix for them goes there and is released as 1.1.x.
-- Local realm: on 2.0. `Caddyfile`, `apps/console` and `apps/doubletap` rewrite
-  `/v1/auth` to `/api` and `/auth` to the root. `.env.local` pins
+- Local realm: on 2.1. `Caddyfile`, `apps/console` and `apps/doubletap` rewrite
+  `/v1/auth` to `/api` and `/auth` to `/ui`. `.env.local` pins
   `OIDC_REDIRECT_URI` to the pre-2.0 callback until the new one is registered
   with the provider.
 - flect's local dev (`flect/justfile`) starts this same checkout on :3003; its
@@ -77,7 +79,7 @@ never draws a page. A route that would do both is two routes.
 
 ```
 src/index.ts          boot: dev mode, the cache and its ping, listen
-src/app.ts            createApp() — the two surfaces assembled; discovery
+src/app.ts            createApp() — /ui, /api and the closed root; discovery
 src/routes/pages.ts   PAGES  /login (page, dev form) /cli /cli/approve /cli/done
 src/routes/oidc.ts    signinRouter: /login/sso /login/:idp /oidc/callback /logout
                         (pages; mounted again under /api, deprecated)
@@ -121,7 +123,7 @@ pnpm build    # tests, then tsup
 ```
 
 Tests go through `createApp()` with real requests (`src/__tests__/setup.ts`),
-asking for paths as the process sees them: `/login`, `/api/session`.
+asking for paths as the process sees them: `/ui/login`, `/api/session`.
 `surfaces.test.ts` states the split itself.
 A rule about what the service accepts is tested through the route, not only
 through the helper — a helper tested alone is how `?returnTo=` went unread for

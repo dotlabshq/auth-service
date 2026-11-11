@@ -47,7 +47,7 @@ describe('signing in with the dev account', () => {
     res.headers.getSetCookie().map((c) => c.split(';')[0]!).filter((c) => !c.endsWith('=')).join('; ')
 
   it('GET /login is a form, not a trip to the identity provider', async () => {
-    const res = await app.get('/login?returnTo=%2Fentries')
+    const res = await app.get('/ui/login?returnTo=%2Fentries')
     expect(res.status).toBe(200)
     const html = await res.text()
     expect(html).toContain('name="password"')
@@ -55,7 +55,7 @@ describe('signing in with the dev account', () => {
   })
 
   it('the right pair signs in for real: a session, a token, and back to where it was going', async () => {
-    const res = await app.postForm('/login', form({ username: 'admin', password: 'correct horse', returnTo: '/entries' }))
+    const res = await app.postForm('/ui/login', form({ username: 'admin', password: 'correct horse', returnTo: '/entries' }))
     expect(res.status).toBe(302)
     expect(res.headers.get('location')).toBe('/entries')
 
@@ -71,7 +71,7 @@ describe('signing in with the dev account', () => {
   })
 
   it('a dev session approves a waiting CLI like any other', async () => {
-    const signedIn = await app.postForm('/login', form({ username: 'admin', password: 'correct horse' }))
+    const signedIn = await app.postForm('/ui/login', form({ username: 'admin', password: 'correct horse' }))
     const { state } = await (await app.get('/api/start')).json() as { state: string }
     const res = await app.post('/api/approve', { state }, { cookie: cookieFrom(signedIn) })
     expect(res.status).toBe(200)
@@ -79,26 +79,26 @@ describe('signing in with the dev account', () => {
   })
 
   it('a wrong pair gets the form again, and no cookie', async () => {
-    const res = await app.postForm('/login', form({ username: 'admin', password: 'wrong', returnTo: '/entries' }))
+    const res = await app.postForm('/ui/login', form({ username: 'admin', password: 'wrong', returnTo: '/entries' }))
     expect(res.status).toBe(401)
     expect(res.headers.getSetCookie()).toEqual([])
     expect(await res.text()).toContain('do not match')
   })
 
   it('the return address is checked on the way out too', async () => {
-    const res = await app.postForm('/login', form({ username: 'admin', password: 'correct horse', returnTo: 'https://evil.example' }))
+    const res = await app.postForm('/ui/login', form({ username: 'admin', password: 'correct horse', returnTo: 'https://evil.example' }))
     expect(res.headers.get('location')).toBe('/')
   })
 
   it('the OIDC callback is not a door into a dev realm', async () => {
-    expect((await app.get('/oidc/callback?code=x')).status).toBe(404)
+    expect((await app.get('/ui/oidc/callback?code=x')).status).toBe(404)
   })
 })
 
 describe('outside dev mode', () => {
   it('POST /login does not exist', async () => {
     const app = await createTestApp()
-    const res = await app.postForm('/login', 'username=admin&password=anything')
+    const res = await app.postForm('/ui/login', 'username=admin&password=anything')
     expect(res.status).toBe(404)
   })
 })

@@ -23,7 +23,7 @@ const cookie = (res: Response, name: string) => res.headers.getSetCookie().some(
 
 describe('sign in straight with a named IdP', () => {
   it('asks the provider to hand over to that IdP, past its own screens', async () => {
-    const res = await app.get('/login/google?returnTo=%2Fentries')
+    const res = await app.get('/ui/login/google?returnTo=%2Fentries')
     expect(res.status).toBe(302)
     const u = authorize(res)
     expect(u.origin + u.pathname).toBe('https://idp.test/oauth/v2/authorize')
@@ -35,7 +35,7 @@ describe('sign in straight with a named IdP', () => {
   })
 
   it('comes back through the same callback, with the same PKCE and return cookies', async () => {
-    const res = await app.get('/login/github?returnTo=%2Fentries')
+    const res = await app.get('/ui/login/github?returnTo=%2Fentries')
     const u = authorize(res)
     expect(u.searchParams.get('redirect_uri')).toBe('http://localhost/auth/oidc/callback')
     expect(u.searchParams.get('code_challenge_method')).toBe('S256')
@@ -45,24 +45,24 @@ describe('sign in straight with a named IdP', () => {
   })
 
   it('still refuses a return address the realm does not publish', async () => {
-    const res = await app.get(`/login/google?returnTo=${encodeURIComponent('https://evil.example')}`)
+    const res = await app.get(`/ui/login/google?returnTo=${encodeURIComponent('https://evil.example')}`)
     const line = res.headers.getSetCookie().find((c) => c.startsWith('oidc_return_to='))!
     expect(decodeURIComponent(line.split(';')[0]!.slice('oidc_return_to='.length))).toBe('/')
   })
 
   it('pins the organization whose login settings apply, when one is configured', async () => {
     process.env['OIDC_ORG_ID'] = '999'
-    expect(scopes(authorize(await app.get('/login/google')))).toContain('urn:zitadel:iam:org:id:999')
+    expect(scopes(authorize(await app.get('/ui/login/google')))).toContain('urn:zitadel:iam:org:id:999')
   })
 
   it('answers 404 for a name nobody configured, instead of the provider screen', async () => {
-    const res = await app.get('/login/myspace')
+    const res = await app.get('/ui/login/myspace')
     expect(res.status).toBe(404)
     expect(await res.json()).toMatchObject({ error: 'unknown_idp' })
   })
 
   it('keeps the provider\'s own sign-in beside them: the picker, no IdP hint', async () => {
-    const u = authorize(await app.get('/login/sso'))
+    const u = authorize(await app.get('/ui/login/sso'))
     expect(u.searchParams.get('prompt')).toBe('select_account')
     expect(scopes(u).some((s) => s.startsWith('urn:zitadel:iam:org:idp:id:'))).toBe(false)
   })
@@ -86,7 +86,7 @@ describe('GET /idps', () => {
 describe('dev mode', () => {
   it('lands every IdP button on the dev form: a laptop realm has no provider', async () => {
     const dev = await createTestApp({ dev: { username: 'admin', password: 'pw', generated: false } })
-    const res = await dev.get('/login/google?returnTo=%2Fentries')
+    const res = await dev.get('/ui/login/google?returnTo=%2Fentries')
     expect(res.status).toBe(302)
     expect(res.headers.get('location')).toBe('http://localhost/auth/login?returnTo=%2Fentries')
   })

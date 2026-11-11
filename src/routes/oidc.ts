@@ -158,8 +158,8 @@ function loginPageUrl(cfg: Config, returnTo: string, error?: string): string {
 /**
  * The navigations of a sign-in: off to the provider, back from it, and out.
  *
- * These are places a browser *goes*, so they belong to the page surface (the
- * service root, published at `/auth`). They are mounted a second time under
+ * These are places a browser *goes*, so they belong to the page surface
+ * (`/ui`, published at `/auth`). They are mounted a second time under
  * `/api` only so that links written before 2.0 — `/v1/auth/login/google`,
  * a `redirect_uri` still registered as `/v1/auth/oidc/callback`,
  * `/v1/auth/logout` — keep working. That second mount is deprecated.
@@ -352,7 +352,7 @@ export function sessionRouter(opts: OidcRouterOptions & { sso: (c: Context) => P
 
   // GET /login — deprecated. Until 2.0 this address (`/v1/auth/login`) started
   // a sign-in; consoles and products link to it. It still does exactly that.
-  // The page a person should be sent to is the service root's `/login`.
+  // The page a person should be sent to is the page surface's `/login`.
   app.get('/login', opts.sso)
 
   // GET /idps — the names a product's login page can offer buttons for. Names

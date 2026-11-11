@@ -79,6 +79,6 @@ serve({ fetch: app.fetch, port }, () => {
   console.log(`auth-service listening on :${port}`)
   if (dev) {
     const urls = publicUrls()
-    console.warn(devBanner(dev, urls.origin ? urls.ui('/login') : `http://localhost:${port}/login`))
+    console.warn(devBanner(dev, urls.origin ? urls.ui('/login') : `http://localhost:${port}/ui/login`))
   }
 })
