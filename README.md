@@ -140,6 +140,21 @@ yourself wanting a token for a *user* from a backend, that is the thing this
 service deliberately does not do — give the service its own identity and grant
 that identity the permission it needs.
 
+#### Giving a service its identity
+
+1. Pick the service's name and generate a secret. Add `name:secret` to
+   `AUTH_SERVICE_CLIENTS` here and give the service the same secret (both as
+   secrets, never in a tracked file).
+2. The service asks for a token at boot with `serviceToken()` from
+   `@baseworks/auth/service-token`, which keeps it and renews it.
+3. Whoever receives the token verifies it like any other, against the realm's
+   published keys, and reads `sub` as the name of the calling service. That is
+   how org-service knows an app is registering *itself*
+   (`POST /_/apps/register`, [org-service README](../org-service/README.md#apps-actions-and-who-may-do-what)).
+
+This identity is only worth something in a realm that signs with ES256: under
+the legacy `JWT_SECRET` any holder can write itself a token with any `sub`.
+
 ### Narrowing a token for an assistant or a CI job
 
 ```bash
