@@ -128,6 +128,46 @@ describe('GET /login is the sign-in page', () => {
   })
 })
 
+describe('the pages speak the person\'s language and wear their theme', () => {
+  it('is Turkish when the product says so, and remembers it for the pages that follow', async () => {
+    const res = await app.get('/ui/login?lang=tr&error=oidc_denied')
+    const html = await res.text()
+    expect(html).toContain('<html lang="tr"')
+    expect(html).toContain('Giriş yap')
+    expect(html).toContain('iptal edildi')
+    // A sign-in leaves for the provider and comes back; the cookie is what is
+    // still there afterwards.
+    expect(res.headers.getSetCookie().some((c) => c.startsWith('bw_lang=tr;'))).toBe(true)
+
+    const next = await (await app.get('/ui/cli/done', { cookie: 'bw_lang=tr' })).text()
+    expect(next).toContain('İzin verildi')
+  })
+
+  it('falls back to the browser\'s language, then to English, and ignores one it does not have', async () => {
+    const tr = await app.fetch(new Request('http://localhost/ui/login', { headers: { 'accept-language': 'tr-TR,tr;q=0.9,en;q=0.8' } }))
+    expect(await tr.text()).toContain('<html lang="tr"')
+    expect(await (await app.get('/ui/login')).text()).toContain('<html lang="en"')
+
+    const odd = await app.get('/ui/login?lang=xx')
+    expect(await odd.text()).toContain('<html lang="en"')
+    expect(odd.headers.getSetCookie()).toEqual([])
+  })
+
+  it('follows the system theme unless told otherwise', async () => {
+    expect(await (await app.get('/ui/login')).text()).toContain('<html lang="en">')
+    const dark = await app.get('/ui/login?theme=dark')
+    expect(await dark.text()).toContain('<html lang="en" data-theme="dark"')
+    expect(dark.headers.getSetCookie().some((c) => c.startsWith('bw_theme=dark;'))).toBe(true)
+  })
+
+  it('takes the realm\'s branding, and this service\'s own where it is set', async () => {
+    process.env['REALM_UI_NAME'] = 'quillpath'
+    expect(await (await app.get('/ui/login')).text()).toContain('Sign in to quillpath')
+    process.env['AUTH_UI_NAME'] = 'clave'
+    expect(await (await app.get('/ui/login')).text()).toContain('Sign in to clave')
+  })
+})
+
 describe('a failed sign-in comes back to the page', () => {
   it('with the reason, and still knowing where the person was headed', async () => {
     const res = await app.get('/ui/oidc/callback?error=access_denied', { cookie: 'oidc_return_to=%2Fentries' })

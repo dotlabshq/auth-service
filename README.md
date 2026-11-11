@@ -20,7 +20,7 @@ the platform and the internal network only.
 
 **In the local realm:** port 3003, pages at `/auth`, the API at `/v1/auth`.
 
-**Where 2.x stands (2026-11-11).** `main` is 2.1.0 (2.0.0 had the pages at the
+**Where 2.x stands (2026-11-11).** `main` is 2.2.0 (2.0.0 had the pages at the
 root, which left `/auth/healthz` reachable from outside; do not deploy it); 1.1.0 is kept on branch
 `1.x` for the deployments still on it. The local realm runs 2.1: `Caddyfile`
 and the console and doubletap rewrites publish both surfaces. Nothing deployed
@@ -167,8 +167,9 @@ organisations.
 | `APP_PUBLIC_URL` | The origin the browser is on; behind a gateway, the gateway's |
 | `AUTH_UI_PATH` · `AUTH_API_PATH` | Where the gateway publishes the pages and the API; default `/auth` and `/v1/auth` — [Mounting](#mounting) |
 | `OIDC_REDIRECT_URI` | The `redirect_uri` handed to the provider; defaults to `APP_PUBLIC_URL` + `AUTH_UI_PATH` + `/oidc/callback` |
-| `AUTH_UI_NAME` · `AUTH_UI_LOGO_URL` · `AUTH_UI_HOME_URL` | The product's name and mark on every page, and where they link |
-| `AUTH_UI_TERMS_URL` · `AUTH_UI_PRIVACY_URL` · `AUTH_UI_ACCENT` | The legal links under every page; the button colour (`#rgb` or `#rrggbb`) |
+| `REALM_UI_NAME` · `REALM_UI_LOGO_URL` · `REALM_UI_HOME_URL` | The product's name and mark on every page, and where they link. Shared with every service that serves pages (org) |
+| `REALM_UI_TERMS_URL` · `REALM_UI_PRIVACY_URL` · `REALM_UI_ACCENT` | The legal links under every page; the button colour (`#rgb` or `#rrggbb`) |
+| `AUTH_UI_*` | The same six, for this service only; wins over `REALM_UI_*` when set (the names 2.0 and 2.1 used) |
 | `AUTH_CLI_APPROVE_URL` | Where `/start` sends a person to approve a CLI sign-in; defaults to this service's own page, `/auth/cli` |
 | `AUTH_RETURN_ORIGINS` | Extra origins `returnTo` may point at, comma-separated; `APP_PUBLIC_URL` is always allowed |
 | `AUTH_DEV_MODE` | `1` to sign in with a password instead of the IdP — [dev mode](#dev-mode-a-password-instead-of-an-identity-provider); never in production |
@@ -283,8 +284,19 @@ Send a person to `/auth/login?returnTo=<where they were going>`. `returnTo` is a
 path, or an absolute URL on an origin the realm publishes (`APP_PUBLIC_URL`,
 `AUTH_RETURN_ORIGINS`); anything else becomes `/`.
 
+**Language and theme.** The pages are in English and Turkish. A product passes
+its own choice once, `?lang=tr` or `?theme=dark` on the link; it is remembered
+in a cookie on the host (`bw_lang`, `bw_theme`), so the pages that follow a trip
+to the provider and back agree, and so do org-service's pages. With no choice
+made the language is the browser's (`Accept-Language`) and the theme is the
+system's. Strings are in `src/pages/strings.ts`.
+
+**One frame for the realm.** The frame, stylesheet, branding and the
+`returnTo` rule come from `@baseworks/core/pages`, which org-service's pages use
+too: a person going from sign-in to the members page sees one system.
+
 The pages are server-rendered HTML with the stylesheet inline: no script, no
-build step, nothing fetched from elsewhere. Every one is drawn by
+build step, nothing fetched from elsewhere. Every one is drawn through
 `src/pages/layout.ts`, so the next screen (an account page, a consent screen) is
 one function and one route in `src/routes/pages.ts`. They are sent with a policy
 that forbids framing and script, and are never cached.

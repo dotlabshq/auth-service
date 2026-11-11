@@ -1,7 +1,7 @@
 import { escapeHtml } from '../lib/html.js'
-import { brand as readBrand } from '../lib/brand.js'
 import { publicUrls } from '../lib/urls.js'
-import { layout } from './layout.js'
+import { layout, type PageView } from './layout.js'
+import { strings, type StringKey } from './strings.js'
 
 /** The providers this page has a mark for. Any other name still gets a button. */
 const PROVIDERS: Record<string, { label: string; icon: string }> = {
@@ -24,19 +24,19 @@ const PROVIDERS: Record<string, { label: string; icon: string }> = {
 }
 
 /**
- * What went wrong on the way back from the provider, in words. The codes are
- * the ones `/oidc/callback` redirects here with; an unknown one gets the last
- * line rather than being echoed.
+ * What went wrong on the way back from the provider, as the key of the
+ * sentence that says so. The codes are the ones `/oidc/callback` redirects
+ * here with; an unknown one gets `errUnknown` rather than being echoed.
  */
-const ERRORS: Record<string, string> = {
-  oidc_denied: 'The sign-in was cancelled or refused. You can try again.',
-  missing_verifier: 'That sign-in took too long, or was started in another browser. Please try again.',
-  token_exchange: 'The identity provider did not complete the sign-in. Please try again.',
-  no_id_token: 'The identity provider did not complete the sign-in. Please try again.',
+const ERRORS: Record<string, StringKey> = {
+  oidc_denied: 'errDenied',
+  missing_verifier: 'errSlow',
+  token_exchange: 'errProvider',
+  no_id_token: 'errProvider',
 }
-const UNKNOWN_ERROR = 'Something went wrong while signing you in. Please try again.'
 
 export interface LoginPageOptions {
+  view: PageView
   /** Already checked by `safeReturnTo`. */
   returnTo: string
   /** Names from `OIDC_IDPS`, in the order configured. */
@@ -58,44 +58,45 @@ export interface LoginPageOptions {
 export function loginPage(opts: LoginPageOptions): string {
   const e = escapeHtml
   const urls = publicUrls()
-  const b = readBrand()
+  const t = strings(opts.view.lang)
+  const name = opts.view.brand.name
   const q = `returnTo=${encodeURIComponent(opts.returnTo)}`
-  const heading = b.name ? `Sign in to ${e(b.name)}` : 'Sign in'
+  const heading = name ? t('signInTo', { name }) : t('signIn')
 
   if (opts.dev) {
     return layout({
-      title: 'Sign in',
-      brand: b,
-      body: `    <span class="tag">DEV MODE</span>
+      title: t('signIn'),
+      view: opts.view,
+      body: `    <span class="tag">${t('devTag')}</span>
     <h1>${heading}</h1>
-    <p>This realm has no identity provider. The password is in auth-service's log.</p>
-    ${opts.dev.failed ? '<p class="error" role="alert">That user and password do not match.</p>' : ''}
+    <p>${t('devHint')}</p>
+    ${opts.dev.failed ? `<p class="error" role="alert">${t('devMismatch')}</p>` : ''}
     <form class="stack" method="POST" action="${e(urls.ui('/login'))}">
       <input type="hidden" name="returnTo" value="${e(opts.returnTo)}">
-      <label>User <input type="text" name="username" autocomplete="username" value="${e(opts.dev.username ?? '')}" required></label>
-      <label>Password <input type="password" name="password" autocomplete="current-password" required autofocus></label>
-      <button class="btn primary" type="submit">Sign in</button>
+      <label>${t('user')} <input type="text" name="username" autocomplete="username" value="${e(opts.dev.username ?? '')}" required></label>
+      <label>${t('password')} <input type="password" name="password" autocomplete="current-password" required autofocus></label>
+      <button class="btn primary" type="submit">${t('signIn')}</button>
     </form>`,
     })
   }
 
-  const message = opts.error ? (ERRORS[opts.error] ?? UNKNOWN_ERROR) : ''
+  const message = opts.error ? t(ERRORS[opts.error] ?? 'errUnknown') : ''
   const sso = e(urls.ui(`/login/sso?${q}`))
-  const buttons = opts.idps.map((name) => {
-    const p = PROVIDERS[name]
-    const label = p?.label ?? name.charAt(0).toUpperCase() + name.slice(1)
-    return `<a class="btn" href="${e(urls.ui(`/login/${encodeURIComponent(name)}?${q}`))}">${p?.icon ?? ''}<span>Continue with ${e(label)}</span></a>`
+  const buttons = opts.idps.map((idp) => {
+    const p = PROVIDERS[idp]
+    const label = p?.label ?? idp.charAt(0).toUpperCase() + idp.slice(1)
+    return `<a class="btn" href="${e(urls.ui(`/login/${encodeURIComponent(idp)}?${q}`))}">${p?.icon ?? ''}<span>${t('continueWith', { provider: label })}</span></a>`
   })
 
   return layout({
-    title: 'Sign in',
-    brand: b,
+    title: t('signIn'),
+    view: opts.view,
     body: `    <h1>${heading}</h1>
-    ${message ? `<p class="error" role="alert">${e(message)}</p>` : ''}
+    ${message ? `<p class="error" role="alert">${message}</p>` : ''}
     <div class="stack">
-      ${buttons.length ? buttons.join('\n      ') : `<a class="btn primary" href="${sso}">Continue</a>`}
+      ${buttons.length ? buttons.join('\n      ') : `<a class="btn primary" href="${sso}">${t('continue')}</a>`}
     </div>
-    ${buttons.length ? `<div class="or"><span>or</span></div>
-    <p class="quiet"><a href="${sso}">Other sign-in options</a></p>` : ''}`,
+    ${buttons.length ? `<div class="or"><span>${t('or')}</span></div>
+    <p class="quiet center"><a href="${sso}">${t('otherOptions')}</a></p>` : ''}`,
   })
 }

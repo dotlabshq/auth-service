@@ -105,7 +105,8 @@ describe('outside dev mode', () => {
 
 describe('the approval page', () => {
   it('echoes the state it was given as text, never as markup', () => {
-    const html = cliApprovePage({ state: '"><script>alert(1)</script>', who: '<b>ada</b>' })
+    const view = { lang: 'en' as const, theme: 'auto' as const, brand: { name: '', homeUrl: '/' } }
+    const html = cliApprovePage({ view, state: '"><script>alert(1)</script>', who: '<b>ada</b>' })
     expect(html).not.toContain('<script>alert(1)')
     expect(html).toContain('&quot;&gt;&lt;script&gt;')
     expect(html).toContain('&lt;b&gt;ada&lt;/b&gt;')

@@ -68,6 +68,8 @@ export async function createTestApp(opts: OidcRouterOptions = {}) {
 
   return {
     kv,
+    /** A request built by hand, for a header the helpers do not set. */
+    fetch: (request: Request) => app.fetch(request),
     get:  (path: string, o?: Parameters<typeof req>[2]) => req('GET', path, o),
     post: (path: string, body: unknown, o?: Omit<Parameters<typeof req>[2], 'body'>) =>
       req('POST', path, { body, ...o }),

@@ -21,43 +21,13 @@
  * about, and the page they wanted was never real.
  */
 
-/** The origins this realm will return to: `APP_PUBLIC_URL` plus any extras. */
+// The rule itself lives with the page frame, because org-service's pages need
+// the same one: a second copy of an open-redirect check is a second place to
+// get it wrong.
+export { safeReturnTo } from '@baseworks/core/pages'
+import { returnOrigins as realmReturnOrigins } from '@baseworks/core/pages'
+
+/** The origins this realm will return to: `APP_PUBLIC_URL` plus `AUTH_RETURN_ORIGINS`. */
 export function returnOrigins(env: Record<string, string | undefined>): string[] {
-  const out: string[] = []
-  for (const raw of [env['APP_PUBLIC_URL'], ...(env['AUTH_RETURN_ORIGINS'] ?? '').split(',')]) {
-    const v = (raw ?? '').trim()
-    if (!v) continue
-    try {
-      out.push(new URL(v).origin)
-    } catch {
-      // A misconfigured origin is dropped rather than widening the allowlist.
-    }
-  }
-  return [...new Set(out)]
-}
-
-/**
- * A `returnTo` that is safe to put in a `Location` header, or `/`.
- *
- * A path must start with a single `/`. `//evil.example` is protocol-relative
- * and a browser reads it as another origin; `/\evil.example` is normalised to
- * the same thing by several of them. Both look like paths and are not.
- */
-export function safeReturnTo(raw: string | undefined, allowed: string[]): string {
-  const value = (raw ?? '').trim()
-  if (!value) return '/'
-
-  if (value.startsWith('/')) {
-    return value.length > 1 && (value[1] === '/' || value[1] === '\\') ? '/' : value
-  }
-
-  try {
-    const url = new URL(value)
-    if ((url.protocol === 'http:' || url.protocol === 'https:') && allowed.includes(url.origin)) {
-      return url.toString()
-    }
-  } catch {
-    // Not a URL at all — a bare word, a `javascript:` payload, whatever.
-  }
-  return '/'
+  return realmReturnOrigins(env, 'AUTH_RETURN_ORIGINS')
 }

@@ -26,7 +26,11 @@ gateway publishes the first two at `/auth` and `/v1/auth`. A page answers HTML o
 never draws a page. A route that would do both is two routes.
 
 - A new screen: a function in `src/pages/` drawn with `layout()`, a route in
-  `src/routes/pages.ts` sent with `respond()`. Nothing else.
+  `src/routes/pages.ts` sent with `respond()`, its sentences in
+  `src/pages/strings.ts` in **every** language there. Nothing else.
+- The frame, the stylesheet, branding, language/theme and the `returnTo` rule
+  are `@baseworks/core/pages`, shared with org-service. Change the look there,
+  never in a copy here.
 - A new endpoint: under `/api`, in `openapi.yaml`, snake_case.
 - **Never write `/auth` or `/v1/auth` in code.** Addresses the browser follows
   come from `publicUrls()` (`src/lib/urls.ts`), which reads configuration. The
@@ -36,7 +40,8 @@ never draws a page. A route that would do both is two routes.
 
 ## Where things stand (2026-11-11)
 
-- `main` = 2.1.0 (2.0.0 had the pages at the root and so published
+- `main` = 2.2.0: pages in en/tr on the realm's shared frame
+  (`@baseworks/core/pages`). (2.0.0 had the pages at the root and so published
   `/auth/healthz`; superseded, do not deploy). `1.x` = 1.1.0, the line every deployed product is still on;
   a fix for them goes there and is released as 1.1.x.
 - Local realm: on 2.1. `Caddyfile`, `apps/console` and `apps/doubletap` rewrite
@@ -88,10 +93,11 @@ src/routes/oidc.ts    signinRouter: /login/sso /login/:idp /oidc/callback /logou
 src/routes/cli.ts     API  /start /poll/:state /approve — the `bw login` device
                       flow; approveCli() — the one place a terminal gets a token
 src/routes/tokens.ts  API  /service-token /exchange
-src/pages/layout.ts   the frame every page is drawn in; respond() and its headers
+src/pages/layout.ts   view() (language, theme, brand), layout(), respond()
+src/pages/strings.ts  every sentence the pages show, en and tr
 src/pages/login.ts    the sign-in page       src/pages/cli.ts  the approval pages
 src/lib/urls.ts       where the gateway publishes us — every public address
-src/lib/brand.ts      what the pages look like, from AUTH_UI_*
+src/lib/brand.ts      what the pages look like: REALM_UI_*, AUTH_UI_* on top
 src/lib/realm.ts      signing keys, issuer, audience, JWKS
 src/lib/mint.ts       mintIdentityToken — every token goes through it
 src/lib/cookies.ts    cookie names, the signed session codec

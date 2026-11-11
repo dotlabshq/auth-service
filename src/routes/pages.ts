@@ -4,7 +4,7 @@ import { parseSession } from '../lib/cookies.js'
 import { DEV_ISSUER, DEV_SESSION_SECONDS, devCredentialsMatch, type DevLogin } from '../lib/dev.js'
 import { safeReturnTo } from '../lib/return-to.js'
 import { cliApprovePage, cliDonePage, cliProblemPage } from '../pages/cli.js'
-import { respond } from '../pages/layout.js'
+import { respond, view } from '../pages/layout.js'
 import { loginPage } from '../pages/login.js'
 import { approveCli, cliRequest, isCliState } from './cli.js'
 import { getConfig, requestedReturn, startSession } from './oidc.js'
@@ -36,8 +36,8 @@ export function pagesRouter(opts: { dev?: DevLogin | null; kv: KvClient }) {
     // page then works as a link to the place behind it.
     if (parseSession(c)?.isAuthenticated) return c.redirect(returnTo)
 
-    if (dev) return respond(c, loginPage({ returnTo, idps: [], dev: {} }))
-    return respond(c, loginPage({ returnTo, idps: [...cfg.idps.keys()], error: c.req.query('error') }))
+    if (dev) return respond(c, loginPage({ view: view(c), returnTo, idps: [], dev: {} }))
+    return respond(c, loginPage({ view: view(c), returnTo, idps: [...cfg.idps.keys()], error: c.req.query('error') }))
   })
 
   // POST /login — dev mode only: the form above posts here.
@@ -55,7 +55,7 @@ export function pagesRouter(opts: { dev?: DevLogin | null; kv: KvClient }) {
 
     if (!devCredentialsMatch(dev, username, password)) {
       await new Promise((r) => setTimeout(r, FAILED_LOGIN_DELAY_MS))
-      return respond(c, loginPage({ returnTo, idps: [], dev: { failed: true, username } }), 401)
+      return respond(c, loginPage({ view: view(c), returnTo, idps: [], dev: { failed: true, username } }), 401)
     }
 
     await startSession(c, cfg, {
@@ -71,7 +71,7 @@ export function pagesRouter(opts: { dev?: DevLogin | null; kv: KvClient }) {
   // GET /cli?state= — where `bw login` sends a person to approve the terminal.
   app.get('/cli', async (c) => {
     const state = c.req.query('state')
-    if (!isCliState(state)) return respond(c, cliProblemPage('missing'), 400)
+    if (!isCliState(state)) return respond(c, cliProblemPage({ view: view(c), problem: 'missing' }), 400)
 
     const session = parseSession(c)
     if (!session?.isAuthenticated) {
@@ -84,16 +84,16 @@ export function pagesRouter(opts: { dev?: DevLogin | null; kv: KvClient }) {
     // Asked before the button is offered: a link opened twice, or an hour
     // late, says so instead of showing a button that can only fail.
     const status = await cliRequest(kv, state)
-    if (status !== 'pending') return respond(c, cliProblemPage(status), status === 'used' ? 409 : 404)
+    if (status !== 'pending') return respond(c, cliProblemPage({ view: view(c), problem: status }), status === 'used' ? 409 : 404)
 
-    return respond(c, cliApprovePage({ state, who: session.email || session.name || session.subject }))
+    return respond(c, cliApprovePage({ view: view(c), state, who: session.email || session.name || session.subject }))
   })
 
   // POST /cli/approve — the page's own button.
   app.post('/cli/approve', async (c) => {
     const cfg     = getConfig(env())
     const state   = (await c.req.parseBody())['state']
-    if (typeof state !== 'string' || !isCliState(state)) return respond(c, cliProblemPage('missing'), 400)
+    if (typeof state !== 'string' || !isCliState(state)) return respond(c, cliProblemPage({ view: view(c), problem: 'missing' }), 400)
 
     const session = parseSession(c)
     if (!session?.isAuthenticated) {
@@ -105,12 +105,12 @@ export function pagesRouter(opts: { dev?: DevLogin | null; kv: KvClient }) {
     if (result.ok) return c.redirect(cfg.urls.ui('/cli/done'))
     if (result.error === 'no_signing_key') return c.json({ error: 'realm has no signing key configured' }, 500)
     return result.error === 'already_used'
-      ? respond(c, cliProblemPage('used'), 409)
-      : respond(c, cliProblemPage('expired'), 404)
+      ? respond(c, cliProblemPage({ view: view(c), problem: 'used' }), 409)
+      : respond(c, cliProblemPage({ view: view(c), problem: 'expired' }), 404)
   })
 
   // GET /cli/done
-  app.get('/cli/done', (c) => respond(c, cliDonePage()))
+  app.get('/cli/done', (c) => respond(c, cliDonePage({ view: view(c) })))
 
   return app
 }
