@@ -1,3 +1,4 @@
+import { audit, personEnvelope, request } from '../lib/audit.js'
 import { Hono, type Context } from 'hono'
 import { getCookie } from 'hono/cookie'
 import { generatePkce, buildOidcAuthUrl } from '@baseworks/auth/pkce'
@@ -28,6 +29,12 @@ function parseJwtPayload(jwt: string): Record<string, unknown> | null {
   } catch {
     return null
   }
+}
+
+/** A person ended their session here: who, if the cookie still says. */
+function signedOut(c: Context): void {
+  const s = parseSession(c)
+  audit('sign_out', { ...request(c), outcome: 'ok', client: 'ui', ...(s?.is_authenticated ? personEnvelope(s.user_id ?? s.subject) : {}) })
 }
 
 export function getConfig(env: Record<string, string | undefined>) {
@@ -93,9 +100,10 @@ export async function startSession(
   c: { header(name: string, value: string, o?: { append?: boolean }): void },
   cfg: ReturnType<typeof getConfig>,
   id: { subject?: string; email?: string; name?: string; picture?: string; issuer?: string; expires_at: number },
-): Promise<void> {
+): Promise<{ user_id: string; degraded: boolean }> {
   const { subject, email, name, picture, issuer, expires_at: expiresAt } = id
   let platformUserId = subject ?? ''
+  let degraded = false
 
   if (subject && email && issuer && iamEnabled()) {
     const userId = await iamSync({ subject, issuer, email, name, picture })
@@ -103,6 +111,7 @@ export async function startSession(
       platformUserId = userId
     } else {
       console.error('[oidc] IAM sync failed; falling back to OIDC subject')
+      degraded = true
     }
   }
 
@@ -137,6 +146,7 @@ export async function startSession(
       c.header('Set-Cookie', `oidc_token=${platformJwt}; ${opts}; Expires=${expires}`, { append: true })
     }
   }
+  return { user_id: platformUserId, degraded }
 }
 
 export interface OidcRouterOptions {
@@ -241,7 +251,11 @@ export function signinRouter(opts: OidcRouterOptions = {}) {
     // offers the buttons again, still knowing where the person was headed.
     // (Before 2.0 it went to `/login`, which was itself a redirect to the
     // provider — a refusal looped straight back into another attempt.)
-    const fail = (reason: string) => c.redirect(loginPageUrl(cfg, returnTo, reason))
+    const req = request(c)
+    const fail = (reason: string) => {
+      audit('sign_in_refused', { ...req, outcome: 'refused', reason, client: 'ui' })
+      return c.redirect(loginPageUrl(cfg, returnTo, reason))
+    }
 
     if (error || !code) return fail('oidc_denied')
 
@@ -283,7 +297,8 @@ export function signinRouter(opts: OidcRouterOptions = {}) {
     const issuer    = payload['iss'] as string | undefined
     const expiresAt = (payload['exp'] as number | undefined) ?? Math.floor(Date.now() / 1000) + (data.expires_in ?? 3600)
 
-    await startSession(c, cfg, { subject, email, name, picture, issuer, expires_at: expiresAt })
+    const who = await startSession(c, cfg, { subject, email, name, picture, issuer, expires_at: expiresAt })
+    audit('sign_in', { ...req, outcome: 'ok', ...personEnvelope(who.user_id), ...(who.degraded ? { degraded: 'iam_sync_failed' } : {}) })
     const expires = new Date(expiresAt * 1000).toUTCString()
     const opts    = cookieOpts(cfg.is_prod, cfg.cookie_domain)
     c.header('Set-Cookie', `${COOKIE_ID_TOKEN}=${data.id_token}; ${opts}; Expires=${expires}`, { append: true })
@@ -312,8 +327,8 @@ export function signinRouter(opts: OidcRouterOptions = {}) {
     const sso        = c.req.query('sso') === '1'
     const idToken    = getCookie(c, COOKIE_ID_TOKEN)
 
+    signedOut(c)
     clearAllCookies(c, cfg.cookie_domain)
-
     // There is no IdP session to end in dev mode.
     if (sso && !dev) {
       try {
@@ -375,6 +390,7 @@ export function sessionRouter(opts: OidcRouterOptions & { sso: (c: Context) => P
   // cleared cookies.
   app.post('/logout', (c) => {
     const cfg = getConfig(process.env as Record<string, string | undefined>)
+    signedOut(c)
     clearAllCookies(c, cfg.cookie_domain)
     return c.body(null, 204)
   })

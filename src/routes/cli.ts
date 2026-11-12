@@ -1,3 +1,4 @@
+import { audit, personEnvelope, request } from '../lib/audit.js'
 import { Hono } from 'hono'
 import { mintIdentityToken } from '../lib/mint.js'
 import type { KvClient } from '../db/client.js'
@@ -98,7 +99,10 @@ export function cliRouter(kv: KvClient) {
   // still taken, and sent on to the page that says it worked.
   app.post('/approve', async (c) => {
     const session = parseSession(c)
-    if (!session?.is_authenticated) return c.json({ error: 'not_authenticated' }, 401)
+    if (!session?.is_authenticated) {
+      audit('cli_approval', { ...request(c), outcome: 'refused', reason: 'not_authenticated', client: 'api' })
+      return c.json({ error: 'not_authenticated' }, 401)
+    }
 
     const ct = c.req.header('content-type') ?? ''
     const isForm = ct.includes('application/x-www-form-urlencoded') || ct.includes('multipart/form-data')
@@ -108,6 +112,7 @@ export function cliRouter(kv: KvClient) {
     if (!state) return c.json({ error: 'state_required' }, 400)
 
     const result = await approveCli(kv, session, state)
+    audit('cli_approval', { ...request(c), client: 'api', ...personEnvelope(session.user_id ?? session.subject, 'api'), ...(result.ok ? { outcome: 'ok' } : { outcome: 'refused', reason: result.error }) } as never)
     if (!result.ok) {
       if (result.error === 'expired_or_invalid') return c.json({ error: result.error }, 404)
       if (result.error === 'already_used') return c.json({ error: result.error }, 409)

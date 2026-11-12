@@ -1,3 +1,4 @@
+import { audit, personEnvelope, request } from '../lib/audit.js'
 import { Hono } from 'hono'
 import type { KvClient } from '../db/client.js'
 import { parseSession } from '../lib/cookies.js'
@@ -53,18 +54,21 @@ export function pagesRouter(opts: { dev?: DevLogin | null; kv: KvClient }) {
     const password = typeof form['password'] === 'string' ? form['password'] : ''
     const returnTo = safeReturnTo(typeof form['returnTo'] === 'string' ? form['returnTo'] : undefined, cfg.return_origins)
 
+    const req = request(c)
     if (!devCredentialsMatch(dev, username, password)) {
+      audit('sign_in_refused', { ...req, outcome: 'refused', reason: 'bad_credentials', client: 'ui' })
       await new Promise((r) => setTimeout(r, FAILED_LOGIN_DELAY_MS))
       return respond(c, loginPage({ view: view(c), return_to: returnTo, idps: [], dev: { failed: true, username } }), 401)
     }
 
-    await startSession(c, cfg, {
+    const who = await startSession(c, cfg, {
       subject:   dev.username,
       issuer:    DEV_ISSUER,
       email:     `${dev.username}@dev.localhost`,
       name:      dev.username,
       expires_at: Math.floor(Date.now() / 1000) + DEV_SESSION_SECONDS,
     })
+    audit('sign_in', { ...req, outcome: 'ok', ...personEnvelope(who.user_id), ...(who.degraded ? { degraded: 'iam_sync_failed' } : {}) })
     return c.redirect(returnTo)
   })
 
@@ -97,11 +101,13 @@ export function pagesRouter(opts: { dev?: DevLogin | null; kv: KvClient }) {
 
     const session = parseSession(c)
     if (!session?.is_authenticated) {
+      audit('cli_approval', { ...request(c), outcome: 'refused', reason: 'not_authenticated', client: 'ui' })
       const back = cfg.urls.uiPath(`/cli?state=${state}`)
       return c.redirect(cfg.urls.ui(`/login?returnTo=${encodeURIComponent(back)}`))
     }
 
     const result = await approveCli(kv, session, state)
+    audit('cli_approval', { ...request(c), client: 'ui', ...personEnvelope(session.user_id ?? session.subject), ...(result.ok ? { outcome: 'ok' } : { outcome: 'refused', reason: result.error }) } as never)
     if (result.ok) return c.redirect(cfg.urls.ui('/cli/done'))
     if (result.error === 'no_signing_key') return c.json({ error: 'realm has no signing key configured' }, 500)
     return result.error === 'already_used'

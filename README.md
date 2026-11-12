@@ -437,6 +437,39 @@ moved. `buildOidcAuthUrl({ clientId, … })` (`@baseworks/auth/pkce`) is the CLI
 shared helper and keeps its spelling; so does the page query `?returnTo=` (a wire
 name published in `openapi.yaml`).
 
+## Audit lines (2.5.0)
+
+auth-service has no store of its own, so what it does is recorded as **audit lines on
+stdout**: one JSON object per line, nothing else on that line, written by one function,
+`audit(event, fields)` in `src/lib/audit.ts`. They are for the infra log collector;
+**retention is infra's**, not this service's. `AUTH_AUDIT=off` turns them off.
+
+Every line has `audit: 1`, `ts` (ISO 8601 UTC), `event`, `service: "auth-service"`,
+`request_id` (the caller's `X-Request-Id` when it looks like one), `ip` (first
+`X-Forwarded-For`, else the socket), `user_agent`, `outcome` (`ok` | `refused`), and the
+workspace-ADR-0004 envelope fields known at that point (`kind`, `actor`, `actor_id`,
+`on_behalf_of`, `via`, `credential_id`, `client`, `org_id`). A refusal adds `reason`, from a
+fixed vocabulary.
+
+| `event` | when | actor |
+|---|---|---|
+| `sign_in` | OIDC callback, dev login | the person (`user:<id>`, `via: session`); `degraded: iam_sync_failed` if iam did not answer and the provider's subject was used |
+| `sign_out` | `GET`/`POST /logout` | the person, if the cookie still says who |
+| `sign_in_refused` | callback error, no code, no PKCE verifier, token exchange failed, no id_token, dev login with a wrong pair | none (`reason`: `oidc_denied`, `missing_verifier`, `token_exchange`, `no_id_token`, `bad_credentials`) |
+| `cli_approval` | the terminal approval page and `POST /approve`: approved or refused | the person (none when nobody was signed in) |
+| `exchange` | `/exchange` narrowing | the person, with the `org_id` they restricted it to |
+| `exchange_key` | `/exchange-key` | on `ok` the principal the realm token says (agent with `on_behalf_of`, machine, person) and its `credential_id`; refused: none |
+| `service_token` | `/service-token` | on `ok` `service:<name>`; refused: the (sanitised) `client_id` offered |
+
+**Never in a line**: a token, key, code, cookie, secret, password or PKCE verifier, nor an
+API token beyond its credential id. Only the fields above are written (anything else passed
+to `audit` is dropped), control characters in a value cannot start a second line, and a
+value that looks like a JWT or an API token is replaced with `[redacted]` even in an allowed
+field. A test feeds every route a known secret and asserts that none appears in stdout.
+
+Known limit: an audit line is best effort. If writing stdout fails the request still
+completes; nothing here can lose a sign-in because a log failed.
+
 ## Known gaps
 
 - **No revocation.** A token is valid until it expires; signing out clears cookies

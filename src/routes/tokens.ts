@@ -21,6 +21,8 @@ import { verifier } from '@baseworks/auth/identity'
 import { mintIdentityToken } from '../lib/mint.js'
 import { iamVerify } from '../lib/iam.js'
 import { realm } from '../lib/realm.js'
+import { audit, envelopeOf, request } from '../lib/audit.js'
+import { principalOf } from '@baseworks/auth/principal'
 
 /** Ceiling for both kinds. Short by design: neither is meant to be carried around. */
 const MAX_TTL = 3600
@@ -71,8 +73,11 @@ export function tokensRouter() {
       expires_in?: number
     }
 
+    const req = request(c)
+    const offered = typeof body.client_id === 'string' ? body.client_id.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 64) : ''
     const clients = serviceClients(process.env)
     if (clients.size === 0) {
+      audit('service_token', { ...req, outcome: 'refused', reason: 'no_clients_configured' })
       return c.json({ error: 'no service clients configured' }, 503)
     }
 
@@ -81,20 +86,29 @@ export function tokensRouter() {
     // Same answer whether the id is unknown or the secret is wrong: telling
     // them apart turns this endpoint into a list of which services exist.
     if (!id || !expected || !body.client_secret || !secretMatches(body.client_secret, expected)) {
+      audit('service_token', { ...req, outcome: 'refused', reason: 'invalid_client', ...(offered ? { client_id: offered } : {}) })
       return c.json({ error: 'invalid_client' }, 401)
     }
 
     const expiresIn = clampTtl(body.expires_in)
     const token = await mintIdentityToken({ sub: id, type: 'service', expires_in_seconds: expiresIn })
-    if (!token) return c.json({ error: 'realm has no signing key configured' }, 500)
+    if (!token) {
+      audit('service_token', { ...req, outcome: 'refused', reason: 'no_signing_key', ...envelopeOf(principalOf({ sub: id, type: 'service' })) })
+      return c.json({ error: 'realm has no signing key configured' }, 500)
+    }
 
+    audit('service_token', { ...req, outcome: 'ok', ...envelopeOf(principalOf({ sub: id, type: 'service' })) })
     return c.json({ token, token_type: 'bearer', expires_in: expiresIn })
   })
 
   // POST /exchange — narrow the caller's own token.
   app.post('/exchange', async (c) => {
+    const req = request(c)
     const header = c.req.header('Authorization')
-    if (!header?.startsWith('Bearer ')) return c.json({ error: 'unauthorized' }, 401)
+    if (!header?.startsWith('Bearer ')) {
+      audit('exchange', { ...req, outcome: 'refused', reason: 'no_bearer' })
+      return c.json({ error: 'unauthorized' }, 401)
+    }
 
     const r = await realm()
     const verify = verifier({
@@ -105,12 +119,17 @@ export function tokensRouter() {
     })
 
     const claims = await verify(header.slice(7))
-    if (!claims?.sub) return c.json({ error: 'unauthorized' }, 401)
+    if (!claims?.sub) {
+      audit('exchange', { ...req, outcome: 'refused', reason: 'invalid_token' })
+      return c.json({ error: 'unauthorized' }, 401)
+    }
+    const caller = principalOf(claims)
 
     // Only a human token may be narrowed. Allowing a service or an already
     // narrowed token to exchange would build chains that outlive and outreach
     // the sign-in they came from.
     if (claims.type !== 'human') {
+      audit('exchange', { ...req, outcome: 'refused', reason: 'not_human', ...envelopeOf(caller) })
       return c.json({ error: 'only a human token can be exchanged' }, 403)
     }
 
@@ -133,8 +152,13 @@ export function tokensRouter() {
         ...(body.scope ? { scope: body.scope } : {}),
       },
     })
-    if (!token) return c.json({ error: 'realm has no signing key configured' }, 500)
+    if (!token) {
+      audit('exchange', { ...req, outcome: 'refused', reason: 'no_signing_key', ...envelopeOf(caller) })
+      return c.json({ error: 'realm has no signing key configured' }, 500)
+    }
 
+    // The person who narrowed their own token; `org_id` is the restriction they asked for.
+    audit('exchange', { ...req, outcome: 'ok', ...envelopeOf(caller, undefined, typeof body.org_id === 'string' ? body.org_id : undefined) })
     return c.json({ token, token_type: 'bearer', expires_in: expiresIn })
   })
 
@@ -156,18 +180,20 @@ export function tokensRouter() {
    * unless iam said yes.
    */
   app.post('/exchange-key', async (c) => {
+    const req = request(c)
+    const refuse = (reason: string) => audit('exchange_key', { ...req, outcome: 'refused', reason })
     const body = (await c.req.json().catch(() => null)) as { token?: unknown } | null
     const given = typeof body?.token === 'string' ? body.token : ''
-    if (!given.startsWith('bwt_')) return c.json({ error: 'invalid_token' }, 401)
+    if (!given.startsWith('bwt_')) { refuse('not_an_api_token'); return c.json({ error: 'invalid_token' }, 401) }
 
     const verdict = await iamVerify(given)
-    if (verdict.status === 'unconfigured') return c.json({ error: 'exchange_unavailable' }, 503)
-    if (verdict.status === 'unavailable') return c.json({ error: 'iam_unavailable' }, 502)
-    if (verdict.status === 'invalid') return c.json({ error: 'invalid_token' }, 401)
+    if (verdict.status === 'unconfigured') { refuse('exchange_unavailable'); return c.json({ error: 'exchange_unavailable' }, 503) }
+    if (verdict.status === 'unavailable') { refuse('iam_unavailable'); return c.json({ error: 'iam_unavailable' }, 502) }
+    if (verdict.status === 'invalid') { refuse('invalid_token'); return c.json({ error: 'invalid_token' }, 401) }
 
     const p = verdict.principal
     const remaining = p.expires_at === null ? EXCHANGE_TTL : Math.floor((p.expires_at - Date.now()) / 1000)
-    if (remaining < 1) return c.json({ error: 'invalid_token' }, 401)
+    if (remaining < 1) { refuse('expired'); return c.json({ error: 'invalid_token' }, 401) }
     const expiresIn = Math.min(EXCHANGE_TTL, remaining)
 
     const token = await mintIdentityToken({
@@ -187,8 +213,14 @@ export function tokensRouter() {
         ...(p.access ? { access: p.access } : {}),
       },
     })
-    if (!token) return c.json({ error: 'realm has no signing key configured' }, 500)
+    if (!token) { refuse('no_signing_key'); return c.json({ error: 'realm has no signing key configured' }, 500) }
 
+    // The principal the realm token says: the same claims, read the way every service reads them.
+    const stands = principalOf({
+      sub: p.actor_id, type: 'assistant', kind: p.kind, via: p.kind === 'machine' ? 'key' : 'token', actor: p.actor,
+      credential_id: p.token_id, on_behalf_of: p.on_behalf_of, role: p.role, org_id: p.org_id, access: p.access,
+    })
+    audit('exchange_key', { ...req, outcome: 'ok', ...envelopeOf(stands) })
     return c.json({ token, token_type: 'bearer', expires_in: expiresIn })
   })
 
