@@ -142,14 +142,28 @@ describe('asking iam', () => {
       ['no actor', { principal: { ...HUMAN, actor: undefined } }], ['empty actor', { principal: { ...HUMAN, actor: '' } }],
       ['no actor_id', { principal: { ...HUMAN, actor_id: undefined } }], ['no token_id', { principal: { ...HUMAN, token_id: undefined } }],
       ['actor_id a number', { principal: { ...HUMAN, actor_id: 5 } }],
-      ['agent with no on_behalf_of', { principal: { ...AGENT, on_behalf_of: undefined } }], ['agent with empty on_behalf_of', { principal: { ...AGENT, on_behalf_of: '' } }],
-      ['machine with no role', { principal: { ...MACHINE, role: undefined } }], ['machine with no org', { principal: { ...MACHINE, org_id: null } }],
     ]
     for (const [name, body] of bad) {
       answer = () => new Response(typeof body === 'string' ? body : JSON.stringify(body), { status: 200 })
       const res = await exchange(SECRET)
       expect(res.status, name).toBe(502)
       expect(await res.json(), name).toEqual({ error: 'iam_unavailable' })
+    }
+  })
+
+  it('a live token that cannot stand in the realm is 401 invalid_token, not an outage', async () => {
+    const unsupported: Array<[string, unknown]> = [
+      ['agent with no on_behalf_of (an old org key of type agent)', { principal: { ...AGENT, on_behalf_of: undefined } }],
+      ['agent with empty on_behalf_of', { principal: { ...AGENT, on_behalf_of: '' } }],
+      ['machine with no role', { principal: { ...MACHINE, role: undefined } }], ['machine with no org', { principal: { ...MACHINE, org_id: null } }],
+    ]
+    for (const [name, body] of unsupported) {
+      answer = () => new Response(JSON.stringify(body), { status: 200 })
+      const res = await exchange(SECRET)
+      expect(res.status, name).toBe(401)
+      const json = await res.json() as Record<string, unknown>
+      expect(json, name).toEqual({ error: 'invalid_token' })
+      expect(JSON.stringify(json), name).not.toContain('eyJ')
     }
   })
 

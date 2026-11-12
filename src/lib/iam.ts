@@ -79,7 +79,7 @@ export interface VerifiedPrincipal {
 
 export type Verification =
   | { status: 'ok'; principal: VerifiedPrincipal }
-  | { status: 'invalid' }
+  | { status: 'invalid'; reason?: 'unsupported_credential' }
   | { status: 'unavailable' }
   | { status: 'unconfigured' }
 
@@ -93,6 +93,12 @@ const text = (v: unknown): v is string => typeof v === 'string' && v.length > 0
  * revoked, expired, an agent suspended or removed): `invalid`. iam not
  * answering, answering 5xx, or answering something that is not a principal is
  * `unavailable`: never a reason to let a token through.
+ *
+ * A live token that cannot stand in the realm (an agent with no person behind
+ * it, such as the old organization keys of type `agent`; a machine with no role
+ * or organization) is the credential's fault, not iam's: `invalid`, reason
+ * `unsupported_credential`, so the caller gets 401 and not a 502 that reads as
+ * an outage.
  */
 export async function iamVerify(apiToken: string): Promise<Verification> {
   const url = (process.env['IAM_SERVICE_URL'] ?? '').replace(/\/+$/, '')
@@ -114,8 +120,8 @@ export async function iamVerify(apiToken: string): Promise<Verification> {
   const org_id = text(p['org_id']) ? p['org_id'] : null
   const expires_at = typeof p['expires_at'] === 'number' ? p['expires_at'] : null
   const access = Array.isArray(p['access']) ? (p['access'].filter((a) => a === 'read' || a === 'write') as Array<'read' | 'write'>) : undefined
-  if (kind === 'agent' && !text(p['on_behalf_of'])) return { status: 'unavailable' }
-  if (kind === 'machine' && (!text(p['role']) || !org_id)) return { status: 'unavailable' }
+  if (kind === 'agent' && !text(p['on_behalf_of'])) return { status: 'invalid', reason: 'unsupported_credential' }
+  if (kind === 'machine' && (!text(p['role']) || !org_id)) return { status: 'invalid', reason: 'unsupported_credential' }
   return {
     status: 'ok',
     principal: {

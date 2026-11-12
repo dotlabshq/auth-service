@@ -345,7 +345,10 @@ token expires)`: `sub` is the actor id, `type: assistant` for every kind,
 `kind`, `actor`, `credential_id`, `via` (`token`, or `key` for a machine),
 `on_behalf_of` (agent), `role` (machine), `org_id` when bound, `access` when iam
 answered one. Anything not a `bwt_` token, and every way a token can be dead, is
-`401 invalid_token`; iam unreachable or wrong is `502 iam_unavailable`; no
+`401 invalid_token`, and so is a live token that cannot stand in the realm (an
+agent with no person behind it, such as an old organization key of type
+`agent`; a machine with no role or organization: audit reason
+`unsupported_credential`); iam unreachable or wrong is `502 iam_unavailable`; no
 `IAM_SERVICE_URL` is `503 exchange_unavailable`. **A revoked API token keeps
 working for up to five minutes**, as long as a realm token minted before it
 lives. `@baseworks/auth` 2.2.0 calls this from `requireAuth` (`AUTH_URL`).

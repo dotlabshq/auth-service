@@ -189,7 +189,7 @@ export function tokensRouter() {
     const verdict = await iamVerify(given)
     if (verdict.status === 'unconfigured') { refuse('exchange_unavailable'); return c.json({ error: 'exchange_unavailable' }, 503) }
     if (verdict.status === 'unavailable') { refuse('iam_unavailable'); return c.json({ error: 'iam_unavailable' }, 502) }
-    if (verdict.status === 'invalid') { refuse('invalid_token'); return c.json({ error: 'invalid_token' }, 401) }
+    if (verdict.status === 'invalid') { refuse(verdict.reason ?? 'invalid_token'); return c.json({ error: 'invalid_token' }, 401) }
 
     const p = verdict.principal
     const remaining = p.expires_at === null ? EXCHANGE_TTL : Math.floor((p.expires_at - Date.now()) / 1000)
