@@ -24,19 +24,19 @@ export function getIdToken(c: Context): string | undefined {
 }
 
 export interface OidcSession {
-  isAuthenticated: boolean
+  is_authenticated: boolean
   subject: string
   email: string
   name: string
   issuer: string
-  expiresAt: number
+  expires_at: number
   /**
    * Resolved platform identity — the IAM user id in IAM mode, or the OIDC
    * subject in login-only mode. Stored here so `/token` and CLI `/approve` mint
    * JWTs without a database round-trip. auth carries NO org — a user has only
    * memberships, resolved by org-service when an app needs org context.
    */
-  userId?: string
+  user_id?: string
 }
 
 /**
@@ -44,17 +44,22 @@ export interface OidcSession {
  *
  * The cookie itself keeps its own shape on purpose. It is storage, not a
  * contract, and renaming its keys would invalidate every session cookie already
- * in a browser — signing everyone out to tidy up a field name.
+ * in a browser — signing everyone out to tidy up a field name. In code the
+ * session is snake_case like everything else (`is_authenticated`, `expires_at`,
+ * `user_id`); `encodeSession` writes the keys the cookie has always had
+ * (`isAuthenticated`, `expiresAt`, `userId`) and `decodeSession` reads either
+ * spelling, so a cookie from before 2.4.0 still signs the person in and a
+ * release that is rolled back still reads what this one wrote.
  */
 export function serializeSession(s: OidcSession): Record<string, unknown> {
   return {
-    is_authenticated: s.isAuthenticated,
+    is_authenticated: s.is_authenticated,
     subject: s.subject,
     email: s.email,
     name: s.name,
     issuer: s.issuer,
-    expires_at: s.expiresAt,
-    ...(s.userId ? { user_id: s.userId } : {}),
+    expires_at: s.expires_at,
+    ...(s.user_id ? { user_id: s.user_id } : {}),
   }
 }
 
@@ -62,10 +67,10 @@ export function parseSession(c: Context): OidcSession | null {
   const raw = getCookie(c, COOKIE_SESSION)
   if (!raw) return null
   const parsed = decodeSession(raw)
-  if (!parsed || !parsed.isAuthenticated) return null
+  if (!parsed || !parsed.is_authenticated) return null
   // The cookie's own Expires is advice to the browser; a client can keep
   // sending it. The signed expiry inside is the one that counts.
-  if (!(parsed.expiresAt > Math.floor(Date.now() / 1000))) return null
+  if (!(parsed.expires_at > Math.floor(Date.now() / 1000))) return null
   return parsed
 }
 
@@ -115,12 +120,42 @@ function tag(payload: string, key: Buffer): string {
   return createHmac('sha256', key).update(payload).digest('base64url')
 }
 
+/** The keys the cookie has always carried. Storage, not a contract: see `serializeSession`. */
+function toStored(s: OidcSession): Record<string, unknown> {
+  return {
+    isAuthenticated: s.is_authenticated,
+    subject: s.subject,
+    email: s.email,
+    name: s.name,
+    issuer: s.issuer,
+    expiresAt: s.expires_at,
+    ...(s.user_id ? { userId: s.user_id } : {}),
+  }
+}
+
+/** A stored session in either spelling. Anything that is not a session is null. */
+function fromStored(raw: unknown): OidcSession | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const r = raw as Record<string, unknown>
+  const pick = (snake: string, camel: string) => (snake in r ? r[snake] : r[camel])
+  const user_id = pick('user_id', 'userId')
+  return {
+    is_authenticated: pick('is_authenticated', 'isAuthenticated') as boolean,
+    subject: r['subject'] as string,
+    email: r['email'] as string,
+    name: r['name'] as string,
+    issuer: r['issuer'] as string,
+    expires_at: pick('expires_at', 'expiresAt') as number,
+    ...(typeof user_id === 'string' && user_id ? { user_id } : {}),
+  }
+}
+
 export function encodeSession(session: OidcSession, env: NodeJS.ProcessEnv = process.env): string {
   const key = sessionKey(env)
   // A deployment with no key must fail loudly here rather than hand out a
   // cookie that nothing can verify.
   if (!key) throw new Error('cannot sign a session: set AUTH_SESSION_SECRET, JWT_SECRET or AUTH_SIGNING_KEY')
-  const payload = Buffer.from(JSON.stringify(session), 'utf8').toString('base64url')
+  const payload = Buffer.from(JSON.stringify(toStored(session)), 'utf8').toString('base64url')
   return `${payload}.${tag(payload, key)}`
 }
 
@@ -138,7 +173,7 @@ export function decodeSession(raw: string, env: NodeJS.ProcessEnv = process.env)
   if (given.length !== want.length || !timingSafeEqual(given, want)) return null
 
   try {
-    return JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as OidcSession
+    return fromStored(JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')))
   } catch {
     return null
   }

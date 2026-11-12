@@ -38,7 +38,7 @@ const ERRORS: Record<string, StringKey> = {
 export interface LoginPageOptions {
   view: PageView
   /** Already checked by `safeReturnTo`. */
-  returnTo: string
+  return_to: string
   /** Names from `OIDC_IDPS`, in the order configured. */
   idps: string[]
   /** An error code from the callback, as it arrived in `?error=`. */
@@ -60,7 +60,7 @@ export function loginPage(opts: LoginPageOptions): string {
   const urls = publicUrls()
   const t = strings(opts.view.lang)
   const name = opts.view.brand.name
-  const q = `returnTo=${encodeURIComponent(opts.returnTo)}`
+  const q = `returnTo=${encodeURIComponent(opts.return_to)}`
   const heading = name ? t('signInTo', { name }) : t('signIn')
 
   if (opts.dev) {
@@ -72,7 +72,7 @@ export function loginPage(opts: LoginPageOptions): string {
     <p>${t('devHint')}</p>
     ${opts.dev.failed ? `<p class="error" role="alert">${t('devMismatch')}</p>` : ''}
     <form class="stack" method="POST" action="${e(urls.ui('/login'))}">
-      <input type="hidden" name="returnTo" value="${e(opts.returnTo)}">
+      <input type="hidden" name="returnTo" value="${e(opts.return_to)}">
       <label>${t('user')} <input type="text" name="username" autocomplete="username" value="${e(opts.dev.username ?? '')}" required></label>
       <label>${t('password')} <input type="password" name="password" autocomplete="current-password" required autofocus></label>
       <button class="btn primary" type="submit">${t('signIn')}</button>

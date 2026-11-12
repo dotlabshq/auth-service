@@ -30,7 +30,7 @@ export interface Realm {
   issuer: string
   audience: string
   /** HS256 secret, while the realm still has one. */
-  legacySecret?: string
+  legacy_secret?: string
 }
 
 let cached: Realm | undefined
@@ -59,7 +59,7 @@ export async function realm(env: NodeJS.ProcessEnv = process.env): Promise<Realm
       '[realm] AUTH_SIGNING_KEY not set — minting HS256 tokens with the shared secret. ' +
         'Every service holding that secret can also mint tokens; set a signing key to end that.',
     )
-    cached = { issuer, audience, ...(legacySecret ? { legacySecret } : {}) }
+    cached = { issuer, audience, ...(legacySecret ? { legacy_secret: legacySecret } : {}) }
     return cached
   }
 
@@ -73,7 +73,7 @@ export async function realm(env: NodeJS.ProcessEnv = process.env): Promise<Realm
     jwks: jwks(signing, retired),
     issuer,
     audience,
-    ...(legacySecret ? { legacySecret } : {}),
+    ...(legacySecret ? { legacy_secret: legacySecret } : {}),
   }
   console.log(
     `[realm] signing ES256 as ${issuer} (aud ${audience}), kid ${signing.kid}` +

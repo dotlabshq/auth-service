@@ -51,11 +51,11 @@ export async function approveCli(kv: KvClient, session: OidcSession, state: stri
 
   // The identity was resolved at OIDC callback and carried in the session (the
   // IAM user id in IAM mode; the OIDC subject in login-only mode).
-  const userId = session.userId ?? session.subject
+  const userId = session.user_id ?? session.subject
 
   // Identity JWT — identity only. An app that needs org context resolves
   // membership via org-service; auth does not scope tokens to orgs.
-  const token = await mintIdentityToken({ sub: userId, type: 'human', expiresInSeconds: IDENTITY_TTL })
+  const token = await mintIdentityToken({ sub: userId, type: 'human', expires_in_seconds: IDENTITY_TTL })
   if (!token) return { ok: false, error: 'no_signing_key' }
 
   await kv.set(stateKey(state), JSON.stringify({ status: 'done', token }), { ttl: 60 })
@@ -98,7 +98,7 @@ export function cliRouter(kv: KvClient) {
   // still taken, and sent on to the page that says it worked.
   app.post('/approve', async (c) => {
     const session = parseSession(c)
-    if (!session?.isAuthenticated) return c.json({ error: 'not_authenticated' }, 401)
+    if (!session?.is_authenticated) return c.json({ error: 'not_authenticated' }, 401)
 
     const ct = c.req.header('content-type') ?? ''
     const isForm = ct.includes('application/x-www-form-urlencoded') || ct.includes('multipart/form-data')

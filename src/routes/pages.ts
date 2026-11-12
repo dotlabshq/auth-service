@@ -30,14 +30,14 @@ export function pagesRouter(opts: { dev?: DevLogin | null; kv: KvClient }) {
   // GET /login — the sign-in page.
   app.get('/login', (c) => {
     const cfg      = getConfig(env())
-    const returnTo = safeReturnTo(requestedReturn(c), cfg.returnOrigins)
+    const returnTo = safeReturnTo(requestedReturn(c), cfg.return_origins)
 
     // Someone already signed in has nothing to do here; a link to the sign-in
     // page then works as a link to the place behind it.
-    if (parseSession(c)?.isAuthenticated) return c.redirect(returnTo)
+    if (parseSession(c)?.is_authenticated) return c.redirect(returnTo)
 
-    if (dev) return respond(c, loginPage({ view: view(c), returnTo, idps: [], dev: {} }))
-    return respond(c, loginPage({ view: view(c), returnTo, idps: [...cfg.idps.keys()], error: c.req.query('error') }))
+    if (dev) return respond(c, loginPage({ view: view(c), return_to: returnTo, idps: [], dev: {} }))
+    return respond(c, loginPage({ view: view(c), return_to: returnTo, idps: [...cfg.idps.keys()], error: c.req.query('error') }))
   })
 
   // POST /login — dev mode only: the form above posts here.
@@ -51,11 +51,11 @@ export function pagesRouter(opts: { dev?: DevLogin | null; kv: KvClient }) {
     const form = await c.req.parseBody()
     const username = typeof form['username'] === 'string' ? form['username'].trim() : ''
     const password = typeof form['password'] === 'string' ? form['password'] : ''
-    const returnTo = safeReturnTo(typeof form['returnTo'] === 'string' ? form['returnTo'] : undefined, cfg.returnOrigins)
+    const returnTo = safeReturnTo(typeof form['returnTo'] === 'string' ? form['returnTo'] : undefined, cfg.return_origins)
 
     if (!devCredentialsMatch(dev, username, password)) {
       await new Promise((r) => setTimeout(r, FAILED_LOGIN_DELAY_MS))
-      return respond(c, loginPage({ view: view(c), returnTo, idps: [], dev: { failed: true, username } }), 401)
+      return respond(c, loginPage({ view: view(c), return_to: returnTo, idps: [], dev: { failed: true, username } }), 401)
     }
 
     await startSession(c, cfg, {
@@ -63,7 +63,7 @@ export function pagesRouter(opts: { dev?: DevLogin | null; kv: KvClient }) {
       issuer:    DEV_ISSUER,
       email:     `${dev.username}@dev.localhost`,
       name:      dev.username,
-      expiresAt: Math.floor(Date.now() / 1000) + DEV_SESSION_SECONDS,
+      expires_at: Math.floor(Date.now() / 1000) + DEV_SESSION_SECONDS,
     })
     return c.redirect(returnTo)
   })
@@ -74,7 +74,7 @@ export function pagesRouter(opts: { dev?: DevLogin | null; kv: KvClient }) {
     if (!isCliState(state)) return respond(c, cliProblemPage({ view: view(c), problem: 'missing' }), 400)
 
     const session = parseSession(c)
-    if (!session?.isAuthenticated) {
+    if (!session?.is_authenticated) {
       // Sign in first, then come back to this page with the same request.
       const cfg  = getConfig(env())
       const back = cfg.urls.uiPath(`/cli?state=${state}`)
@@ -96,7 +96,7 @@ export function pagesRouter(opts: { dev?: DevLogin | null; kv: KvClient }) {
     if (typeof state !== 'string' || !isCliState(state)) return respond(c, cliProblemPage({ view: view(c), problem: 'missing' }), 400)
 
     const session = parseSession(c)
-    if (!session?.isAuthenticated) {
+    if (!session?.is_authenticated) {
       const back = cfg.urls.uiPath(`/cli?state=${state}`)
       return c.redirect(cfg.urls.ui(`/login?returnTo=${encodeURIComponent(back)}`))
     }

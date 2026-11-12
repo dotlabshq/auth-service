@@ -52,7 +52,7 @@ const serviceName = () => process.env['AUTH_SERVICE_NAME'] ?? 'auth-service'
 export async function iamSync(id: OidcIdentity): Promise<string | null> {
   const base = iamBase()
   if (!base) return null
-  const token = await mintIdentityToken({ sub: serviceName(), type: 'service', expiresInSeconds: 60 })
+  const token = await mintIdentityToken({ sub: serviceName(), type: 'service', expires_in_seconds: 60 })
   if (!token) return null
   const res = await fetch(`${base}/sync`, {
     method: 'POST',
@@ -97,7 +97,7 @@ const text = (v: unknown): v is string => typeof v === 'string' && v.length > 0
 export async function iamVerify(apiToken: string): Promise<Verification> {
   const url = (process.env['IAM_SERVICE_URL'] ?? '').replace(/\/+$/, '')
   if (!url) return { status: 'unconfigured' }
-  const service = await mintIdentityToken({ sub: serviceName(), type: 'service', expiresInSeconds: 60 })
+  const service = await mintIdentityToken({ sub: serviceName(), type: 'service', expires_in_seconds: 60 })
   if (!service) return { status: 'unavailable' }
   const res = await fetch(`${url}/_/tokens/verify`, {
     method: 'POST',

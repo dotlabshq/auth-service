@@ -85,7 +85,7 @@ export function tokensRouter() {
     }
 
     const expiresIn = clampTtl(body.expires_in)
-    const token = await mintIdentityToken({ sub: id, type: 'service', expiresInSeconds: expiresIn })
+    const token = await mintIdentityToken({ sub: id, type: 'service', expires_in_seconds: expiresIn })
     if (!token) return c.json({ error: 'realm has no signing key configured' }, 500)
 
     return c.json({ token, token_type: 'bearer', expires_in: expiresIn })
@@ -101,7 +101,7 @@ export function tokensRouter() {
       ...(r.jwks ? { jwks: r.jwks } : {}),
       ...(r.issuer ? { issuer: r.issuer } : {}),
       ...(r.audience ? { audience: r.audience } : {}),
-      ...(r.legacySecret ? { legacyHs256Secret: r.legacySecret } : {}),
+      ...(r.legacy_secret ? { legacy_hs256_secret: r.legacy_secret } : {}),
     })
 
     const claims = await verify(header.slice(7))
@@ -124,7 +124,7 @@ export function tokensRouter() {
     const token = await mintIdentityToken({
       sub: claims.sub,
       type: 'assistant',
-      expiresInSeconds: expiresIn,
+      expires_in_seconds: expiresIn,
       claims: {
         // `org_id` is a RESTRICTION, not a grant: it says "only this org".
         // Membership is still the consuming service's question to ask, because
@@ -175,7 +175,7 @@ export function tokensRouter() {
       // `assistant` for every kind: a verifier from before ADR 0004 must never
       // read this as a person who signed in.
       type: 'assistant',
-      expiresInSeconds: expiresIn,
+      expires_in_seconds: expiresIn,
       claims: {
         kind: p.kind,
         via: p.kind === 'machine' ? 'key' : 'token',

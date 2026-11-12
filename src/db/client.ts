@@ -39,11 +39,11 @@ export function kvAdapter(redis: Redis): KvClient {
  * to the real clock at runtime.
  */
 export function memoryKvAdapter(nowMs: () => number = () => Date.now()): KvClient {
-  const store = new Map<string, { value: string; expiresAt: number | null }>()
+  const store = new Map<string, { value: string; expires_at: number | null }>()
   const live = (key: string) => {
     const e = store.get(key)
     if (!e) return null
-    if (e.expiresAt !== null && e.expiresAt <= nowMs()) {
+    if (e.expires_at !== null && e.expires_at <= nowMs()) {
       store.delete(key)
       return null
     }
@@ -52,7 +52,7 @@ export function memoryKvAdapter(nowMs: () => number = () => Date.now()): KvClien
   return {
     get: async (key) => live(key)?.value ?? null,
     set: async (key, value, opts) => {
-      store.set(key, { value, expiresAt: opts?.ttl ? nowMs() + opts.ttl * 1000 : null })
+      store.set(key, { value, expires_at: opts?.ttl ? nowMs() + opts.ttl * 1000 : null })
     },
     del: async (key) => {
       store.delete(key)

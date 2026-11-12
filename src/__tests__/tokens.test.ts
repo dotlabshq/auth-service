@@ -97,7 +97,7 @@ describe('POST /service-token', () => {
 describe('POST /exchange', () => {
   async function humanToken(sub = 'usr_1'): Promise<string> {
     const { mintIdentityToken } = await import('../lib/mint.js')
-    return (await mintIdentityToken({ sub, type: 'human', expiresInSeconds: 3600 }))!
+    return (await mintIdentityToken({ sub, type: 'human', expires_in_seconds: 3600 }))!
   }
 
   it('narrows a human token to one org and a scope', async () => {
@@ -133,7 +133,7 @@ describe('POST /exchange', () => {
     const { loadSigningKey, mint } = await import('@baseworks/auth/identity')
     const foreign = await loadSigningKey(await exportPKCS8(privateKey))
     const token = await mint(foreign, { sub: 'usr_1', type: 'human' }, {
-      issuer: ISSUER, audience: AUDIENCE, expiresInSeconds: 600,
+      issuer: ISSUER, audience: AUDIENCE, expires_in_seconds: 600,
     })
 
     expect((await post(app(), '/exchange', { org_id: 'org_1' }, token)).status).toBe(401)

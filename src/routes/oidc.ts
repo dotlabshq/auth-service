@@ -33,22 +33,22 @@ function parseJwtPayload(jwt: string): Record<string, unknown> | null {
 export function getConfig(env: Record<string, string | undefined>) {
   return {
     issuer:       (env['OIDC_ISSUER']  ?? '').replace(/\/+$/, ''),
-    clientId:     env['OIDC_CLIENT_ID'] ?? '',
-    clientSecret: env['OIDC_CLIENT_SECRET'],
+    client_id:     env['OIDC_CLIENT_ID'] ?? '',
+    client_secret: env['OIDC_CLIENT_SECRET'],
     scope:        (env['OIDC_SCOPE'] ?? 'openid profile email offline_access').split(' '),
     // Every address the browser is sent to — see lib/urls.ts.
     urls:         publicUrls(env),
     // Exact post-logout URL to hand the IdP (must match what's registered on
     // the OIDC app). Defaults to the app origin (no trailing slash).
-    postLogoutUrl: (env['OIDC_POST_LOGOUT_URL'] ?? '').replace(/\/+$/, ''),
-    cookieDomain: env['OIDC_COOKIE_DOMAIN'],
+    post_logout_url: (env['OIDC_POST_LOGOUT_URL'] ?? '').replace(/\/+$/, ''),
+    cookie_domain: env['OIDC_COOKIE_DOMAIN'],
     // Where a sign-in or sign-out may send the browser afterwards. Anything
     // else lands on `/` — see lib/return-to.ts.
-    returnOrigins: returnOrigins(env),
-    isProd:       env['NODE_ENV'] === 'production',
+    return_origins: returnOrigins(env),
+    is_prod:       env['NODE_ENV'] === 'production',
     // Sign-in straight with a named IdP — see lib/idps.ts.
     idps:         parseIdps(env['OIDC_IDPS']),
-    orgId:        (env['OIDC_ORG_ID'] ?? '').trim() || undefined,
+    org_id:        (env['OIDC_ORG_ID'] ?? '').trim() || undefined,
   }
 }
 
@@ -92,9 +92,9 @@ function clearAllCookies(c: { header(name: string, value: string, o?: { append?:
 export async function startSession(
   c: { header(name: string, value: string, o?: { append?: boolean }): void },
   cfg: ReturnType<typeof getConfig>,
-  id: { subject?: string; email?: string; name?: string; picture?: string; issuer?: string; expiresAt: number },
+  id: { subject?: string; email?: string; name?: string; picture?: string; issuer?: string; expires_at: number },
 ): Promise<void> {
-  const { subject, email, name, picture, issuer, expiresAt } = id
+  const { subject, email, name, picture, issuer, expires_at: expiresAt } = id
   let platformUserId = subject ?? ''
 
   if (subject && email && issuer && iamEnabled()) {
@@ -107,18 +107,18 @@ export async function startSession(
   }
 
   const session = encodeSession({
-    isAuthenticated: true,
+    is_authenticated: true,
     subject:  subject ?? '',
     email:    email   ?? '',
     name:     name    ?? '',
     issuer:   issuer  ?? '',
-    expiresAt,
-    userId:   platformUserId,
+    expires_at: expiresAt,
+    user_id:  platformUserId,
   })
 
   const expires  = new Date(expiresAt * 1000).toUTCString()
-  const opts     = cookieOpts(cfg.isProd, cfg.cookieDomain)
-  const clearOpt = `HttpOnly; Path=/; Max-Age=0${cfg.cookieDomain ? `; Domain=${cfg.cookieDomain}` : ''}`
+  const opts     = cookieOpts(cfg.is_prod, cfg.cookie_domain)
+  const clearOpt = `HttpOnly; Path=/; Max-Age=0${cfg.cookie_domain ? `; Domain=${cfg.cookie_domain}` : ''}`
 
   c.header('Set-Cookie', `${COOKIE_PKCE}=; ${clearOpt}`, { append: true })
   c.header('Set-Cookie', `${COOKIE_RETURN_TO}=; ${clearOpt}`, { append: true })
@@ -131,7 +131,7 @@ export async function startSession(
   if (platformUserId) {
     const platformTtl = expiresAt - Math.floor(Date.now() / 1000)
     const platformJwt = await mintIdentityToken({
-      sub: platformUserId, type: 'human', expiresInSeconds: platformTtl,
+      sub: platformUserId, type: 'human', expires_in_seconds: platformTtl,
     })
     if (platformJwt) {
       c.header('Set-Cookie', `oidc_token=${platformJwt}; ${opts}; Expires=${expires}`, { append: true })
@@ -185,14 +185,14 @@ export function signinRouter(opts: OidcRouterOptions = {}) {
     const pkce    = await generatePkce()
     const authUrl = buildOidcAuthUrl({
       issuer:      cfg.issuer,
-      clientId:    cfg.clientId,
+      clientId:    cfg.client_id,
       redirectUri: cfg.urls.callback,
       challenge:   pkce.challenge,
       ...(ask.prompt ? { prompt: ask.prompt } : {}),
       scopes:      ask.scopes,
     })
 
-    const opts = cookieOpts(cfg.isProd, cfg.cookieDomain) + '; Max-Age=600'
+    const opts = cookieOpts(cfg.is_prod, cfg.cookie_domain) + '; Max-Age=600'
     c.header('Set-Cookie', `${COOKIE_PKCE}=${pkce.verifier}; ${opts}`, { append: true })
     c.header('Set-Cookie', `${COOKIE_RETURN_TO}=${encodeURIComponent(redirectTo)}; ${opts}`, { append: true })
     return c.redirect(authUrl)
@@ -203,7 +203,7 @@ export function signinRouter(opts: OidcRouterOptions = {}) {
     const cfg = getConfig(process.env as Record<string, string | undefined>)
     // Checked here rather than on the way back, so a poisoned value is never
     // stored in a cookie in the first place.
-    const redirectTo = safeReturnTo(requestedReturn(c), cfg.returnOrigins)
+    const redirectTo = safeReturnTo(requestedReturn(c), cfg.return_origins)
     return redirectToIdp(c, cfg, redirectTo, { prompt: 'select_account', scopes: cfg.scope })
   }
 
@@ -215,13 +215,13 @@ export function signinRouter(opts: OidcRouterOptions = {}) {
   // No `prompt`: the IdP shows its own account chooser where it has one.
   app.get('/login/:idp', async (c) => {
     const cfg        = getConfig(process.env as Record<string, string | undefined>)
-    const redirectTo = safeReturnTo(requestedReturn(c), cfg.returnOrigins)
+    const redirectTo = safeReturnTo(requestedReturn(c), cfg.return_origins)
     if (dev) return c.redirect(loginPageUrl(cfg, redirectTo))
 
     const idpId = cfg.idps.get(c.req.param('idp').toLowerCase())
     if (!idpId) return c.json({ error: 'unknown_idp', message: 'No such sign-in provider is configured' }, 404)
 
-    return redirectToIdp(c, cfg, redirectTo, { scopes: [...cfg.scope, ...idpScopes(idpId, cfg.orgId)] })
+    return redirectToIdp(c, cfg, redirectTo, { scopes: [...cfg.scope, ...idpScopes(idpId, cfg.org_id)] })
   })
 
   // GET /oidc/callback
@@ -235,7 +235,7 @@ export function signinRouter(opts: OidcRouterOptions = {}) {
     // Again, because the cookie holding it is the client's: a browser that
     // arrives with one this service never wrote is still a browser to send
     // somewhere safe.
-    const returnTo = safeReturnTo(decodeCookieValue(getCookie(c, COOKIE_RETURN_TO)), cfg.returnOrigins)
+    const returnTo = safeReturnTo(decodeCookieValue(getCookie(c, COOKIE_RETURN_TO)), cfg.return_origins)
 
     // A failure goes back to the sign-in page, which says what happened and
     // offers the buttons again, still knowing where the person was headed.
@@ -254,10 +254,10 @@ export function signinRouter(opts: OidcRouterOptions = {}) {
       // The same address the authorize request carried, whichever mount the
       // provider came back through: the provider compares the two.
       redirect_uri:  cfg.urls.callback,
-      client_id:     cfg.clientId,
+      client_id:     cfg.client_id,
       code_verifier: verifier,
     })
-    if (cfg.clientSecret) body.set('client_secret', cfg.clientSecret)
+    if (cfg.client_secret) body.set('client_secret', cfg.client_secret)
 
     const tokenRes = await fetch(`${cfg.issuer}/oauth/v2/token`, {
       method:  'POST',
@@ -283,9 +283,9 @@ export function signinRouter(opts: OidcRouterOptions = {}) {
     const issuer    = payload['iss'] as string | undefined
     const expiresAt = (payload['exp'] as number | undefined) ?? Math.floor(Date.now() / 1000) + (data.expires_in ?? 3600)
 
-    await startSession(c, cfg, { subject, email, name, picture, issuer, expiresAt })
+    await startSession(c, cfg, { subject, email, name, picture, issuer, expires_at: expiresAt })
     const expires = new Date(expiresAt * 1000).toUTCString()
-    const opts    = cookieOpts(cfg.isProd, cfg.cookieDomain)
+    const opts    = cookieOpts(cfg.is_prod, cfg.cookie_domain)
     c.header('Set-Cookie', `${COOKIE_ID_TOKEN}=${data.id_token}; ${opts}; Expires=${expires}`, { append: true })
 
     if (data.access_token) {
@@ -308,11 +308,11 @@ export function signinRouter(opts: OidcRouterOptions = {}) {
   // post_logout_redirect_uri to be registered on the OIDC app.
   app.get('/logout', async (c) => {
     const cfg        = getConfig(process.env as Record<string, string | undefined>)
-    const redirectTo = safeReturnTo(requestedReturn(c), cfg.returnOrigins)
+    const redirectTo = safeReturnTo(requestedReturn(c), cfg.return_origins)
     const sso        = c.req.query('sso') === '1'
     const idToken    = getCookie(c, COOKIE_ID_TOKEN)
 
-    clearAllCookies(c, cfg.cookieDomain)
+    clearAllCookies(c, cfg.cookie_domain)
 
     // There is no IdP session to end in dev mode.
     if (sso && !dev) {
@@ -326,7 +326,7 @@ export function signinRouter(opts: OidcRouterOptions = {}) {
           // origin (all without a trailing slash so "…/" mismatches don't bite).
           const post = redirectTo.startsWith('http')
             ? redirectTo.replace(/\/+$/, '')
-            : (cfg.postLogoutUrl || cfg.urls.origin)
+            : (cfg.post_logout_url || cfg.urls.origin)
           endUrl.searchParams.set('post_logout_redirect_uri', post)
           if (idToken) endUrl.searchParams.set('id_token_hint', idToken)
           return c.redirect(endUrl.toString())
@@ -375,7 +375,7 @@ export function sessionRouter(opts: OidcRouterOptions & { sso: (c: Context) => P
   // cleared cookies.
   app.post('/logout', (c) => {
     const cfg = getConfig(process.env as Record<string, string | undefined>)
-    clearAllCookies(c, cfg.cookieDomain)
+    clearAllCookies(c, cfg.cookie_domain)
     return c.body(null, 204)
   })
 
@@ -389,18 +389,18 @@ export function sessionRouter(opts: OidcRouterOptions & { sso: (c: Context) => P
     if (state) return c.redirect(cfg.urls.ui(`/cli?state=${encodeURIComponent(state)}`))
 
     const session = parseSession(c)
-    if (!session?.isAuthenticated) return c.json({ error: 'not_authenticated' }, 401)
+    if (!session?.is_authenticated) return c.json({ error: 'not_authenticated' }, 401)
 
     // The identity was resolved at callback and stored in the session, so no
     // round-trip is needed here.
-    const userId  = session.userId ?? session.subject
-    const ttl     = Math.max(session.expiresAt - Math.floor(Date.now() / 1000), 60)
-    const expires = new Date(session.expiresAt * 1000).toUTCString()
+    const userId  = session.user_id ?? session.subject
+    const ttl     = Math.max(session.expires_at - Math.floor(Date.now() / 1000), 60)
+    const expires = new Date(session.expires_at * 1000).toUTCString()
 
-    const token = await mintIdentityToken({ sub: userId, type: 'human', expiresInSeconds: ttl })
+    const token = await mintIdentityToken({ sub: userId, type: 'human', expires_in_seconds: ttl })
     if (!token) return c.json({ error: 'realm has no signing key configured' }, 500)
 
-    const opts = cookieOpts(cfg.isProd, cfg.cookieDomain)
+    const opts = cookieOpts(cfg.is_prod, cfg.cookie_domain)
     c.header('Set-Cookie', `oidc_token=${token}; ${opts}; Expires=${expires}`, { append: true })
 
     return c.json({ token, token_type: 'bearer', expires_in: ttl })

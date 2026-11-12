@@ -15,7 +15,7 @@ import { realm } from './realm.js'
 export interface MintInput {
   sub: string
   type: IdentityType
-  expiresInSeconds: number
+  expires_in_seconds: number
   /** Extra claims — a narrowed token's org and scope, for instance. */
   claims?: Record<string, unknown>
 }
@@ -32,18 +32,18 @@ export async function mintIdentityToken(input: MintInput): Promise<string | null
     return mintEs256(
       r.signing,
       { sub: input.sub, type: input.type, ...(input.claims ?? {}) },
-      { issuer: r.issuer, audience: r.audience, expiresInSeconds: input.expiresInSeconds },
+      { issuer: r.issuer, audience: r.audience, expires_in_seconds: input.expires_in_seconds },
     )
   }
 
-  if (r.legacySecret) {
+  if (r.legacy_secret) {
     // Migration path. Deliberately keeps the old claim shape: a verifier still
     // running the previous release has never seen iss/aud and would reject a
     // token carrying them.
     return signHs256Jwt(
       { sub: input.sub, type: input.type, ...(input.claims ?? {}) },
-      r.legacySecret,
-      input.expiresInSeconds,
+      r.legacy_secret,
+      input.expires_in_seconds,
     )
   }
 

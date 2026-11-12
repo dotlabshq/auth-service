@@ -78,8 +78,10 @@ never draws a page. A route that would do both is two routes.
    way to become someone else or to be sent somewhere else.
 5. **Dev mode never reaches production.** `AUTH_DEV_MODE` with
    `NODE_ENV=production` stops the service at boot. Keep it that way.
-6. **Snake_case on the wire** (ADR-043). The session *cookie* keeps its own
-   camelCase shape: it is storage, and renaming it signs everyone out.
+6. **Snake_case on the wire** (ADR-043) and, since 2.4.0, in code. The session
+   *cookie* keeps its own camelCase keys (`isAuthenticated`, `expiresAt`,
+   `userId`): it is storage, and renaming it signs everyone out. `lib/cookies.ts`
+   maps them to the snake_case `OidcSession` and reads either spelling.
 
 ## Where things are
 

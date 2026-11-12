@@ -76,7 +76,7 @@ import { requireAuth } from '@baseworks/auth/hono'
 
 app.use('*', requireAuth)
 app.get('/things', (c) => {
-  const { userId, tokenType } = c.get('auth')
+  const { user_id, token_type } = c.get('auth')
 })
 ```
 
@@ -417,9 +417,25 @@ same thing: nobody approved in time.
 Bodies are `snake_case` (ADR-043), which the OAuth2 fields — `token_type`,
 `expires_in`, `client_id` — already were; the plane had been mixing the two.
 
+Since 2.4.0 the same holds in code (workspace ADR 0003): properties of objects and
+types (`expires_in_seconds` for minting, `legacy_secret` in the realm, the OIDC
+config's `client_id`, `is_prod`, …) and the session as the code holds it
+(`is_authenticated`, `expires_at`, `user_id`). Local variables, functions and
+types keep TypeScript naming.
+
 The **session cookie** keeps its own shape. It is storage, not a contract, and
 renaming its keys would invalidate every session already in a browser — signing
-everyone out to tidy up a field name.
+everyone out to tidy up a field name. So the cookie is written with the keys it
+has always had (`isAuthenticated`, `expiresAt`, `userId`) and read in either
+spelling: a cookie from before 2.4.0 still signs the person in, and a release
+rolled back to 2.3 still reads what 2.4 wrote.
+
+`@baseworks/auth` 2.3.0 keeps its deprecated camelCase spellings (`auth.userId`,
+`c.get('requestId')`, `mint({ expiresInSeconds })` …) for services that have not
+moved; auth-service reads only the new names. They go when the last service has
+moved. `buildOidcAuthUrl({ clientId, … })` (`@baseworks/auth/pkce`) is the CLI's
+shared helper and keeps its spelling; so does the page query `?returnTo=` (a wire
+name published in `openapi.yaml`).
 
 ## Known gaps
 

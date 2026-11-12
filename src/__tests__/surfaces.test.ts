@@ -23,8 +23,8 @@ beforeEach(async () => {
 afterEach(() => { process.env = { ...saved } })
 
 const session = () => `${SESSION_COOKIE_NAME}=${makeSessionCookie({
-  isAuthenticated: true, subject: 'sub-1', userId: 'usr_1', email: 'ada@example.test', name: 'Ada', issuer: 'https://idp.test',
-  expiresAt: Math.floor(Date.now() / 1000) + 3600,
+  is_authenticated: true, subject: 'sub-1', user_id: 'usr_1', email: 'ada@example.test', name: 'Ada', issuer: 'https://idp.test',
+  expires_at: Math.floor(Date.now() / 1000) + 3600,
 })}`
 const location = (res: Response) => res.headers.get('location')
 

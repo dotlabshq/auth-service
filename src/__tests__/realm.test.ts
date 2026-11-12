@@ -22,9 +22,9 @@ function app() {
 async function approvedToken(a: ReturnType<typeof app>): Promise<string> {
   const start = (await (await a.request('/api/start')).json()) as { state: string }
   const session = makeSessionCookie({
-    isAuthenticated: true, subject: 'oidc-sub', userId: 'usr_1',
+    is_authenticated: true, subject: 'oidc-sub', user_id: 'usr_1',
     email: 'a@b.test', name: 'A', issuer: 'https://idp.test',
-    expiresAt: Math.floor(Date.now() / 1000) + 3600,
+    expires_at: Math.floor(Date.now() / 1000) + 3600,
   })
   await a.request('/api/approve', {
     method: 'POST',

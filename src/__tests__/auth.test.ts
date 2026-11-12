@@ -87,10 +87,10 @@ describe('auth is login-only — no org endpoints', () => {
 
 describe('session cookie codec — non-Latin-1 names', () => {
   const session = {
-    isAuthenticated: true, subject: 'sub-1', email: 'ismail@example.com',
+    is_authenticated: true, subject: 'sub-1', email: 'ismail@example.com',
     // İ (U+0130) is outside Latin-1: btoa() threw InvalidCharacterError here and
     // /oidc/callback answered 500 for this user while ASCII names logged in fine.
-    name: 'İsmail Demirbilek', issuer: 'https://idp.example', expiresAt: 4102444800,
+    name: 'İsmail Demirbilek', issuer: 'https://idp.example', expires_at: 4102444800,
   }
 
   it('round-trips a name with İ/ş/ğ', () => {
@@ -129,12 +129,12 @@ describe('GET /session — browser session check', () => {
 
   it('returns 200 with authenticated session cookie', async () => {
     const cookie = makeSessionCookie({
-      isAuthenticated: true,
+      is_authenticated: true,
       subject: 'sub-001',
       email: 'user@test.com',
       name: 'Test User',
       issuer: 'https://auth.test',
-      expiresAt: Math.floor(Date.now() / 1000) + 3600,
+      expires_at: Math.floor(Date.now() / 1000) + 3600,
     })
     const res = await app.get('/api/session', { cookie: `${SESSION_COOKIE_NAME}=${cookie}` })
     expect(res.status).toBe(200)
@@ -158,7 +158,7 @@ describe('GET /session — browser session check', () => {
   })
 
   it('returns 401 for unauthenticated session cookie', async () => {
-    const cookie = makeSessionCookie({ isAuthenticated: false })
+    const cookie = makeSessionCookie({ is_authenticated: false })
     const res = await app.get('/api/session', { cookie: `${SESSION_COOKIE_NAME}=${cookie}` })
     expect(res.status).toBe(401)
   })
@@ -168,9 +168,9 @@ describe('GET /session — browser session check', () => {
 
 describe('POST /approve answers its caller in kind', () => {
   const session = {
-    isAuthenticated: true, subject: 'sub-1', userId: 'usr_1',
+    is_authenticated: true, subject: 'sub-1', user_id: 'usr_1',
     email: 'a@b.test', name: 'A', issuer: 'https://idp.test',
-    expiresAt: Math.floor(Date.now() / 1000) + 3600,
+    expires_at: Math.floor(Date.now() / 1000) + 3600,
   }
 
   it('JSON in, JSON out — and the token goes to the CLI, not to the page', async () => {
@@ -207,11 +207,11 @@ describe('POST /approve answers its caller in kind', () => {
 
 describe('a hand-built session cookie is not a session', () => {
   const claim = {
-    isAuthenticated: true,
+    is_authenticated: true,
     subject: 'victim', email: 'victim@example.com', name: 'Victim',
     issuer: 'https://auth.test',
-    expiresAt: Math.floor(Date.now() / 1000) + 3600,
-    userId: 'victim',
+    expires_at: Math.floor(Date.now() / 1000) + 3600,
+    user_id: 'victim',
   }
 
   it('GET /session refuses it', async () => {
@@ -241,10 +241,10 @@ describe('GET /token — mints a JWT from the session (no database)', () => {
   it('login-only: token carries the OIDC subject as sub and no org_id', async () => {
     const { verifyHs256Jwt } = await import('@baseworks/auth/jwt')
     const cookie = makeSessionCookie({
-      isAuthenticated: true,
+      is_authenticated: true,
       subject: 'sub-xyz', email: 'a@b.com', name: 'A', issuer: 'https://auth.test',
-      expiresAt: Math.floor(Date.now() / 1000) + 3600,
-      userId: 'sub-xyz',
+      expires_at: Math.floor(Date.now() / 1000) + 3600,
+      user_id: 'sub-xyz',
     })
     const res = await app.get('/api/token', { cookie: `${SESSION_COOKIE_NAME}=${cookie}` })
     expect(res.status).toBe(200)
@@ -257,10 +257,10 @@ describe('GET /token — mints a JWT from the session (no database)', () => {
   it('IAM mode: token carries the resolved userId as sub, still no org_id', async () => {
     const { verifyHs256Jwt } = await import('@baseworks/auth/jwt')
     const cookie = makeSessionCookie({
-      isAuthenticated: true,
+      is_authenticated: true,
       subject: 'sub-xyz', email: 'a@b.com', name: 'A', issuer: 'https://auth.test',
-      expiresAt: Math.floor(Date.now() / 1000) + 3600,
-      userId: 'iam-user-1',
+      expires_at: Math.floor(Date.now() / 1000) + 3600,
+      user_id: 'iam-user-1',
     })
     const res = await app.get('/api/token', { cookie: `${SESSION_COOKIE_NAME}=${cookie}` })
     expect(res.status).toBe(200)

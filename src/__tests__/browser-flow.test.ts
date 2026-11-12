@@ -65,8 +65,8 @@ describe('logout', () => {
 describe('a session is only as long as the expiry signed inside it', () => {
   it('an expired session cookie is not a session, even with a valid tag', async () => {
     const expired = makeSessionCookie({
-      isAuthenticated: true, subject: 's', userId: 'usr_1', email: 'a@b.test', name: 'A', issuer: 'i',
-      expiresAt: Math.floor(Date.now() / 1000) - 1,
+      is_authenticated: true, subject: 's', user_id: 'usr_1', email: 'a@b.test', name: 'A', issuer: 'i',
+      expires_at: Math.floor(Date.now() / 1000) - 1,
     })
     expect((await app.get('/api/session', { cookie: `${SESSION_COOKIE_NAME}=${expired}` })).status).toBe(401)
     expect((await app.get('/api/token', { cookie: `${SESSION_COOKIE_NAME}=${expired}` })).status).toBe(401)
