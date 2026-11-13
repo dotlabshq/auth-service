@@ -26,7 +26,7 @@ import { principalOf } from '@baseworks/auth/principal'
 import { kvTake, type KvClient } from '../db/client.js'
 import { audit, envelopeOf, personEnvelope, request, type AuditFields } from '../lib/audit.js'
 import { parseSession } from '../lib/cookies.js'
-import { ACCESS_TOKEN_SECONDS, SCOPES, endpoints, exchangers, issuerUrl, knownResources } from '../lib/oauth/config.js'
+import { EXCHANGED_TOKEN_SECONDS, SCOPES, accessTokenSeconds, endpoints, exchangers, issuerUrl, knownResources } from '../lib/oauth/config.js'
 import { iamOauth, membershipsOf } from '../lib/oauth/iam.js'
 import { orgServiceUrl } from '../lib/oauth/config.js'
 import { lookupClient, type OAuthClientInfo } from '../lib/oauth/clients.js'
@@ -194,8 +194,9 @@ export function oauthRouter(kv: KvClient) {
 
     const asked = (q['scope'] ?? '').split(/\s+/).filter(Boolean)
     if (asked.some((s) => !(SCOPES as readonly string[]).includes(s))) return fail('invalid_scope', 'scopes are read, write and offline_access')
-    const scope = asked.length ? asked : ['read']
-    if (!scope.includes('read') && !scope.includes('write')) scope.push('read')
+    // No scope (Claude Code sends none) is a request for what the resource offers: read and write. The person still chooses.
+    const scope = [...asked]
+    if (!scope.includes('read') && !scope.includes('write')) scope.unshift('read', 'write')
 
     // 3. Who is the person. Not signed in: sign in, and come back to this exact request.
     const session = parseSession(c)
@@ -355,11 +356,11 @@ export function oauthRouter(kv: KvClient) {
       if (made.status !== 201 || !made.data.grant || !made.data.refresh_token) return refuse(400, 'invalid_grant', `grant_${made.data.error ?? made.status}`, { client_id: client.client_id })
       const g = made.data.grant
       await kv.set(`oauth:used:${sha256b64(code)}`, g.id, { ttl: CODE_TTL })
-      const token = await mintFor(g, rec.resource, ACCESS_TOKEN_SECONDS)
+      const token = await mintFor(g, rec.resource, accessTokenSeconds())
       if (!token) return oauthError(c, 500, 'server_error')
       audit('oauth_token', { ...req, outcome: 'ok', step: 'code_exchanged', ...agentEnvelope(g), client_id: client.client_id, resource: rec.resource, resource_sent: given ? 'yes' : 'no', grant_id: g.id, scope: rec.scope })
       noStore(c)
-      return c.json({ access_token: token, token_type: 'Bearer', expires_in: ACCESS_TOKEN_SECONDS, refresh_token: made.data.refresh_token, scope: rec.scope })
+      return c.json({ access_token: token, token_type: 'Bearer', expires_in: accessTokenSeconds(), refresh_token: made.data.refresh_token, scope: rec.scope })
     }
 
     if (grant_type === GRANT_REFRESH) {
@@ -375,11 +376,11 @@ export function oauthRouter(kv: KvClient) {
       }
       const g = out.data.grant
       if (given && given !== g.resource) return refuse(400, 'invalid_target', 'resource_mismatch', { client_id: client.client_id })
-      const token = await mintFor(g, g.resource, ACCESS_TOKEN_SECONDS)
+      const token = await mintFor(g, g.resource, accessTokenSeconds())
       if (!token) return oauthError(c, 500, 'server_error')
       audit('oauth_token', { ...req, outcome: 'ok', step: 'refreshed', ...agentEnvelope(g), client_id: client.client_id, resource: g.resource, resource_sent: given ? 'yes' : 'no', grant_id: g.id })
       noStore(c)
-      return c.json({ access_token: token, token_type: 'Bearer', expires_in: ACCESS_TOKEN_SECONDS, refresh_token: out.data.refresh_token, scope: [...g.access, 'offline_access'].join(' ') })
+      return c.json({ access_token: token, token_type: 'Bearer', expires_in: accessTokenSeconds(), refresh_token: out.data.refresh_token, scope: [...g.access, 'offline_access'].join(' ') })
     }
 
     return refuse(400, 'unsupported_grant_type', 'unsupported_grant_type', { client_id: client.client_id })
@@ -410,9 +411,14 @@ export function oauthRouter(kv: KvClient) {
     if (!claims || claims['via'] !== 'oauth' || claims['kind'] !== 'agent' || typeof claims['credential_id'] !== 'string') return refuse(400, 'invalid_grant', 'subject_token_invalid')
     const remaining = Math.floor(((claims.exp ?? 0) * 1000 - Date.now()) / 1000)
     if (remaining < 1) return refuse(400, 'invalid_grant', 'subject_token_expired')
+    // The access token lives an hour: whether the grant is still good is asked of iam at every exchange, so a revocation
+    // (or a suspended or removed agent, or a removed owner) stops tool calls within the realm token's five minutes.
+    const live = await iamOauth<{ live?: boolean; reason?: string }>('GET', `/grants/${encodeURIComponent(String(claims['credential_id']))}`)
+    if (live.status === 0 || live.status >= 500) return refuse(502, 'server_error', 'iam_unavailable', { grant_id: String(claims['credential_id']) })
+    if (live.status !== 200 || live.data.live !== true) return refuse(400, 'invalid_grant', `grant_not_live_${live.data.reason ?? 'unknown'}`, { grant_id: String(claims['credential_id']) })
     const p = principalOf(claims)
     const token = await mintIdentityToken({
-      sub: String(claims.sub), type: 'assistant', expires_in_seconds: Math.min(ACCESS_TOKEN_SECONDS, remaining),
+      sub: String(claims.sub), type: 'assistant', expires_in_seconds: Math.min(EXCHANGED_TOKEN_SECONDS, remaining),
       claims: {
         kind: 'agent', via: 'oauth', actor: p.actor, ...(p.on_behalf_of ? { on_behalf_of: p.on_behalf_of } : {}), credential_id: claims['credential_id'],
         ...(p.access ? { access: p.access } : {}), ...(p.org_id ? { org_id: p.org_id } : {}), client: 'mcp', ...(typeof claims['client_id'] === 'string' ? { client_id: claims['client_id'] } : {}),
@@ -421,27 +427,41 @@ export function oauthRouter(kv: KvClient) {
     if (!token) return oauthError(c, 500, 'server_error')
     audit('oauth_token', { ...req, outcome: 'ok', step: 'exchanged', client: 'mcp', ...envelopeOf(p, 'mcp'), ...(typeof claims['client_id'] === 'string' ? { client_id: claims['client_id'] } : {}), grant_id: String(claims['credential_id']) })
     noStore(c)
-    return c.json({ access_token: token, issued_token_type: ACCESS_TOKEN_TYPE, token_type: 'Bearer', expires_in: Math.min(ACCESS_TOKEN_SECONDS, remaining) })
+    return c.json({ access_token: token, issued_token_type: ACCESS_TOKEN_TYPE, token_type: 'Bearer', expires_in: Math.min(EXCHANGED_TOKEN_SECONDS, remaining) })
   }
 
   // ── /register (RFC 7591) ───────────────────────────────────────────────────
   app.post('/register', async (c) => {
     const req = request(c)
-    if (!registerLimit(req.ip || 'unknown')) return oauthError(c, 429, 'too_many_requests', 'slow down')
+    const refused = (status: 400 | 429 | 503, error: string, description: string, reason: string, field?: string, hosts?: string) => {
+      audit('oauth_register', { ...req, outcome: 'refused', step: 'register', reason, client: 'api', ...(field ? { field } : {}), ...(hosts ? { redirect_hosts: hosts } : {}) })
+      return oauthError(c, status, error, description)
+    }
+    if (!registerLimit(req.ip || 'unknown')) return refused(429, 'too_many_requests', 'slow down', 'rate_limited_per_address')
     const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null
-    if (!body || typeof body !== 'object') return oauthError(c, 400, 'invalid_client_metadata', 'a JSON body is required')
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return refused(400, 'invalid_client_metadata', 'a JSON body is required', 'body_not_json_object')
     const uris = body['redirect_uris']
-    if (!Array.isArray(uris) || uris.length === 0 || !uris.every((u) => typeof u === 'string')) return oauthError(c, 400, 'invalid_redirect_uri', 'redirect_uris is a list of strings')
-    if (!(uris as string[]).every(redirectAllowed)) return oauthError(c, 400, 'invalid_redirect_uri', 'a redirect URI is https, or http on localhost, 127.0.0.1 or [::1], with no fragment')
-    const method = typeof body['token_endpoint_auth_method'] === 'string' ? body['token_endpoint_auth_method'] : 'none'
-    if (method !== 'none') return oauthError(c, 400, 'invalid_client_metadata', 'registered clients are public: token_endpoint_auth_method is none')
+    if (!Array.isArray(uris) || uris.length === 0 || !uris.every((u) => typeof u === 'string')) return refused(400, 'invalid_redirect_uri', 'redirect_uris is a list of strings', 'redirect_uris_not_a_list_of_strings', 'redirect_uris')
+    const hostsOf = (list: string[]) => [...new Set(list.map((u) => { try { return new URL(u).host } catch { return 'unparseable' } }))].slice(0, 5).join(',')
+    const hosts = hostsOf(uris as string[])
+    if (uris.length > 10) return refused(400, 'invalid_redirect_uri', 'one to ten redirect_uris', 'too_many_redirect_uris', 'redirect_uris', hosts)
+    if (!(uris as string[]).every(redirectAllowed)) return refused(400, 'invalid_redirect_uri', 'a redirect URI is https, or http on localhost, 127.0.0.1 or [::1], with no fragment', 'redirect_uri_not_allowed', 'redirect_uris', hosts)
+    // RFC 7591 §2: a server may ignore what it does not support, and says what it registered in the answer. So:
+    // the auth method, grant and response types, scope and every field we do not know are ignored; the client is
+    // registered as a public client (`none`) that uses the code and refresh grants, and the answer says so.
+    const name = (typeof body['client_name'] === 'string' && body['client_name'].trim() ? body['client_name'].trim() : 'Unnamed client').slice(0, 120)
+    // A logo is only ever stored when it is an https URL; anything else is dropped, not a reason to refuse.
+    const logo = typeof body['logo_uri'] === 'string' && /^https:\/\//i.test(body['logo_uri']) && body['logo_uri'].length <= 512 ? body['logo_uri'] : undefined
     const out = await iamOauth<{ client?: { client_id: string; client_name: string; redirect_uris: string[]; created_at: number }; error?: string }>('POST', '/clients', {
-      client_name: typeof body['client_name'] === 'string' && body['client_name'].trim() ? body['client_name'] : 'Unnamed client',
-      redirect_uris: uris, token_endpoint_auth_method: 'none', ...(typeof body['logo_uri'] === 'string' ? { logo_uri: body['logo_uri'] } : {}),
+      client_name: name, redirect_uris: uris, token_endpoint_auth_method: 'none', ...(logo ? { logo_uri: logo } : {}),
     })
-    if (out.status === 429) return oauthError(c, 429, 'too_many_requests', 'too many registrations')
-    if (out.status === 0 || out.status >= 500) return oauthError(c, 503, 'temporarily_unavailable', 'registration is not available')
-    if (out.status !== 201 || !out.data.client) return oauthError(c, 400, String(out.data.error ?? '').startsWith('invalid_redirect') ? 'invalid_redirect_uri' : 'invalid_client_metadata')
+    if (out.status === 429) return refused(429, 'too_many_requests', 'too many registrations', 'rate_limited_global', undefined, hosts)
+    if (out.status === 0 || out.status >= 500) return refused(503, 'temporarily_unavailable', 'registration is not available', 'iam_unavailable', undefined, hosts)
+    if (out.status !== 201 || !out.data.client) {
+      const why = String(out.data.error ?? 'invalid_client_metadata')
+      return refused(400, why.startsWith('invalid_redirect') ? 'invalid_redirect_uri' : 'invalid_client_metadata', why, `iam_${why}`.slice(0, 80), undefined, hosts)
+    }
+    audit('oauth_register', { ...req, outcome: 'ok', step: 'register', client: 'api', client_id: out.data.client.client_id, redirect_hosts: hosts })
     noStore(c)
     return c.json({
       client_id: out.data.client.client_id, client_name: out.data.client.client_name, redirect_uris: out.data.client.redirect_uris,

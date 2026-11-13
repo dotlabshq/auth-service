@@ -514,16 +514,29 @@ On Flect, an `expose` entry for `/.well-known/oauth-authorization-server/v1/auth
   it later). **Each resource gets its own `aud`**, and a refresh token stays with the one it was made for. A client that
   omits `resource` gets the single URL when there is exactly one; with several it must say.
 - **Access token**: a realm JWT (ES256 only), `type: assistant`, `kind: agent`, `via: oauth`, `actor`,
-  `on_behalf_of`, `org_id`, `access`, `credential_id` (the grant), `client_id`, **`aud` = the MCP resource**, five
-  minutes. It is not a realm token: a realm service rejects it. The MCP server exchanges it (`/token`, RFC 8693,
+  `on_behalf_of`, `org_id`, `access`, `credential_id` (the grant), `client_id`, **`aud` = the MCP resource**, **60 minutes**
+  (`AUTH_OAUTH_ACCESS_SECONDS`, 60 to 86400, default 3600; clients such as Claude Code refresh when about five minutes are
+  left, and every refresh rotates the refresh token, so a five-minute token meant a refresh on nearly every request). It is not a realm token: a realm service rejects it. The MCP server exchanges it (`/token`, RFC 8693,
   authenticated with its own service token, `AUTH_OAUTH_EXCHANGERS`, default `mcp`; it says which server it is with
   `resource`, and a token made for another server is `invalid_grant`) for a realm-audience token for the
-  same agent, never longer than the one it came from. Revocation takes effect at the next refresh or exchange: at most
-  five minutes.
+  same agent, five minutes at most and never longer than the one it came from. **Every exchange asks iam whether the grant is
+  still live** (`GET /_/oauth/grants/:id`: revoked, expired, agent suspended or removed, owner removed: `invalid_grant`,
+  audit reason `grant_not_live_*`; iam not answering is a 502), so a revocation on the Agents tab stops tool calls within the
+  realm token's five minutes although the access token itself still verifies for the rest of its hour.
 - **Refresh**: `bwr_…`, held by iam (hashed), rotated each use; reuse revokes the chain; 30 days idle, 90 absolute. It
   is issued whether or not `offline_access` was asked for.
 - **State in this service's KV**: the authorization code (60 s, single use) and the pending consent (10 min). Nothing
   durable.
+- **Scope**: a client that sends none (Claude Code sends none) is asking for `read write`, the resource's scopes. When write is
+  on offer the consent page preselects "read and write"; when only `read` was asked only read is offered. The person can
+  always narrow it, and the audit `scope` is what was granted.
+- **`/register`** accepts what RFC 7591 lets a server ignore (token endpoint auth method, grant and response types, scope,
+  unknown fields; a non-https `logo_uri` is dropped, a long `client_name` cut to 120 characters) and answers with what it
+  registered: a public client, `none`. Refused: redirect URIs that are not https or loopback http, none, or more than ten.
+  Every answer writes an `oauth_register` line (`ok` with `client_id` and the redirect **hosts**; refused with `reason` and the
+  offending `field` name, never values).
+- **Claude Desktop** refuses an `http` authorization URL even on localhost; the Claude Code CLI allows `http://localhost`.
+  Testing with Desktop locally needs https.
 - **Audit lines** `oauth_authorize` (`consent_shown`, `approved`, `approved_remembered`, `consent_refused`,
   `invalid_request`) and `oauth_token` (`code_exchanged`, `refreshed`, `refresh_reuse_detected`, `exchanged`,
   `revoked`, refusals with a `reason`), with the client id, the resource, `resource_sent: yes|no` and the agent's

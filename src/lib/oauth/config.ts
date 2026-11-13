@@ -15,7 +15,18 @@ import { publicUrls } from '../urls.js'
 export const SCOPES = ['read', 'write', 'offline_access'] as const
 export type Scope = (typeof SCOPES)[number]
 
-export const ACCESS_TOKEN_SECONDS = 300
+/**
+ * How long the access token for the MCP server lives (`AUTH_OAUTH_ACCESS_SECONDS`, default 60 minutes). Long, because
+ * clients refresh proactively when a few minutes are left (Claude Code at about 300 s) and every refresh rotates the
+ * refresh token. Revocation stays fast because every exchange for a realm token asks iam whether the grant is live.
+ */
+export function accessTokenSeconds(env: NodeJS.ProcessEnv = process.env): number {
+  const n = Number(env['AUTH_OAUTH_ACCESS_SECONDS'])
+  return Number.isInteger(n) && n >= 60 && n <= 86400 ? n : 3600
+}
+
+/** The realm token an exchange makes: short, whatever the access token's life. A revoked grant stops within this. */
+export const EXCHANGED_TOKEN_SECONDS = 300
 
 /**
  * The issuer: exactly the `iss` of every token this realm mints (`AUTH_ISSUER`, else

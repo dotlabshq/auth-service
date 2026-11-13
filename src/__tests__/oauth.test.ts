@@ -431,18 +431,18 @@ describe('the consent answer', () => {
 // ── /token ────────────────────────────────────────────────────────────────────
 
 describe('/token: authorization_code', () => {
-  it('answers a Bearer access token for five minutes, a refresh token and the scope; nothing is cached', async () => {
+  it('answers a Bearer access token for an hour, a refresh token and the scope; nothing is cached', async () => {
     const who = await person('ada')
     const c = await consent(who)
     const res = await form('/token', { grant_type: 'authorization_code', client_id: CIMD, code: c.code!, code_verifier: c.verifier, redirect_uri: REDIRECT, resource: MCP })
     expect(res.status).toBe(200)
     expect(res.headers.get('cache-control')).toBe('no-store')
     const body = await json(res)
-    expect(body).toMatchObject({ token_type: 'Bearer', expires_in: 300, scope: 'read write' })
+    expect(body).toMatchObject({ token_type: 'Bearer', expires_in: 3600, scope: 'read write' })
     expect(body['refresh_token']).toMatch(/^bwr_/)
   })
 
-  it('the access token is a realm JWT: agent, via oauth, on behalf of the person, bound to the MCP resource, five minutes', async () => {
+  it('the access token is a realm JWT: agent, via oauth, on behalf of the person, bound to the MCP resource, an hour', async () => {
     const who = await person('ada')
     const t = await tokens(who)
     const c = claims(t['access_token'])
@@ -450,7 +450,7 @@ describe('/token: authorization_code', () => {
       iss: ISSUER, aud: MCP, type: 'assistant', kind: 'agent', via: 'oauth', actor: `agent:claude-code@${who.handle}`, on_behalf_of: `user:${who.id}`,
       access: ['read', 'write'], client: 'mcp', client_id: CIMD,
     })
-    expect(c['exp'] - c['iat']).toBe(300)
+    expect(c['exp'] - c['iat']).toBe(3600)
     expect(c['credential_id']).toBeTruthy()
     expect(c['sub']).toBeTruthy()
     expect(c).not.toHaveProperty('org_id')
@@ -467,14 +467,37 @@ describe('/token: authorization_code', () => {
     expect(agents.agents).toEqual([expect.objectContaining({ client_id: CIMD, client_name: 'Claude Code', actor: `agent:claude-code@${who.handle}`, id: claims(t['access_token'])['sub'] })])
   })
 
-  it('the consent page preselects read, also when the client asks for write: write is the person\'s own choice', async () => {
+  it('the consent page preselects read and write when write is on offer (asked, or nothing asked), and offers read only when only read was asked', async () => {
     const who = await person('ada')
-    for (const scope of ['read', 'read write', 'write']) {
+    for (const scope of ['read write', 'write', undefined]) {
       const c = await consent(who, { scope })
-      expect(c.html, scope).toMatch(/value="read" checked/)
-      if (scope !== 'read') expect(c.html, scope).toMatch(/value="write">/)
-      expect(c.html, scope).not.toMatch(/value="write" checked/)
+      expect(c.html, String(scope)).toMatch(/value="write" checked/)
+      expect(c.html, String(scope)).not.toMatch(/value="read" checked/)
     }
+    const r = await consent(who, { scope: 'read' })
+    expect(r.html).toMatch(/value="read" checked/)
+    expect(r.html).not.toMatch(/value="write"/)
+  })
+
+  it('no scope at all (Claude Code sends none) is a request for read and write; the person may still narrow it', async () => {
+    const who = await person('ada')
+    const wide = await tokens(who, { scope: undefined }, { decision: 'approve', access: 'write' })
+    expect(wide['scope']).toBe('read write')
+    expect(claims(wide['access_token'])['access']).toEqual(['read', 'write'])
+    expect(lastAudit('oauth_authorize')).toMatchObject({ outcome: 'ok', scope: 'read write' }) // the audit says what was granted
+    const narrow = await tokens(await person('bob'), { scope: undefined }, { decision: 'approve', access: 'read' })
+    expect(narrow['scope']).toBe('read')
+    expect(lastAudit('oauth_authorize')).toMatchObject({ scope: 'read' })
+    expect(claims(narrow['access_token'])['access']).toEqual(['read'])
+  })
+
+  it('AUTH_OAUTH_ACCESS_SECONDS sets the access token life (default an hour; out of range falls back)', async () => {
+    const who = await person('ada')
+    process.env['AUTH_OAUTH_ACCESS_SECONDS'] = '900'
+    expect((await tokens(who))['expires_in']).toBe(900)
+    process.env['AUTH_OAUTH_ACCESS_SECONDS'] = '5'
+    expect((await tokens(await person('bob')))['expires_in']).toBe(3600)
+    delete process.env['AUTH_OAUTH_ACCESS_SECONDS']
   })
 
   it('a PKCE verifier may use every unreserved character (RFC 7636), `.` and `~` too, as the MCP SDK makes them', async () => {
@@ -566,7 +589,7 @@ describe('/token: refresh_token', () => {
     const r1 = await json(await refresh(t['refresh_token']))
     expect(r1['refresh_token']).toMatch(/^bwr_/)
     expect(r1['refresh_token']).not.toBe(t['refresh_token'])
-    expect(r1).toMatchObject({ token_type: 'Bearer', expires_in: 300 })
+    expect(r1).toMatchObject({ token_type: 'Bearer', expires_in: 3600 })
     const a = claims(t['access_token']), b = claims(r1['access_token'])
     expect(b).toMatchObject({ sub: a['sub'], credential_id: a['credential_id'], aud: MCP, via: 'oauth', kind: 'agent', access: ['read', 'write'] })
     expect((await refresh(r1['refresh_token'])).status).toBe(200)
@@ -647,6 +670,50 @@ describe('/token: token exchange for the MCP server', () => {
     expect(lastAudit('oauth_token')).toMatchObject({ step: 'exchanged', outcome: 'ok', kind: 'agent', actor: a['actor'] })
   })
 
+  it('the access token lives an hour but the realm token five minutes, however long the one it came from has left', async () => {
+    const t = await tokens(await person('ada'))
+    expect(t['expires_in']).toBe(3600)
+    const body = await json(await exchange(t['access_token']))
+    expect(body['expires_in']).toBe(300)
+    expect(claims(body['access_token'])['exp'] - claims(body['access_token'])['iat']).toBe(300)
+  })
+
+  it('a grant the person revoked stops at the exchange, though its access token still verifies', async () => {
+    const who = await person('ada')
+    const t = await tokens(who)
+    const c = claims(t['access_token'])
+    expect((await exchange(t['access_token'])).status).toBe(200)
+    const human = (await mintIdentityToken({ sub: who.id, type: 'human', expires_in_seconds: 60 }))!
+    const del = await iamApp.fetch(new Request(`http://iam.test/api/agents/${c['sub']}/tokens/${c['credential_id']}`, { method: 'DELETE', headers: { authorization: `Bearer ${human}` } }))
+    expect(del.status).toBe(200)
+    const r = await realm()
+    expect(await verifier({ jwks: r.jwks!, issuer: ISSUER, audience: MCP })(t['access_token'])).not.toBeNull()
+    const res = await exchange(t['access_token'])
+    expect(res.status).toBe(400)
+    expect((await json(res))['error']).toBe('invalid_grant')
+    expect(lastAudit('oauth_token')).toMatchObject({ outcome: 'refused', reason: 'grant_not_live_unknown', grant_id: c['credential_id'] })
+  })
+
+  it('a suspended agent stops at the exchange and resuming brings it back', async () => {
+    const who = await person('ada')
+    const t = await tokens(who)
+    const c = claims(t['access_token'])
+    const human = (await mintIdentityToken({ sub: who.id, type: 'human', expires_in_seconds: 60 }))!
+    const patch = (state: string) => iamApp.fetch(new Request(`http://iam.test/api/agents/${c['sub']}`, { method: 'PATCH', headers: { authorization: `Bearer ${human}`, 'content-type': 'application/json' }, body: JSON.stringify({ state }) }))
+    expect((await patch('suspended')).status).toBe(200)
+    expect((await exchange(t['access_token'])).status).toBe(400)
+    expect(lastAudit('oauth_token')).toMatchObject({ reason: 'grant_not_live_agent_inactive' })
+    expect((await patch('active')).status).toBe(200)
+    expect((await exchange(t['access_token'])).status).toBe(200)
+  })
+
+  it('when iam does not answer the exchange is a 502, never a token', async () => {
+    const t = await tokens(await person('ada'))
+    const saved = process.env['IAM_SERVICE_URL']
+    process.env['IAM_SERVICE_URL'] = 'http://down.test'
+    try { expect((await exchange(t['access_token'])).status).toBe(502) } finally { process.env['IAM_SERVICE_URL'] = saved }
+  })
+
   it('only the named service may ask: nobody, a person, another service', async () => {
     const t = await tokens(await person('ada'))
     expect((await exchange(t['access_token'], {}, null)).status).toBe(401)
@@ -714,11 +781,41 @@ describe('/register (RFC 7591)', () => {
     ['a remote http redirect', { redirect_uris: ['http://evil.example/cb'] }, 'invalid_redirect_uri'],
     ['a custom scheme', { redirect_uris: ['myapp://cb'] }, 'invalid_redirect_uri'],
     ['a fragment', { redirect_uris: ['https://a.test/cb#x'] }, 'invalid_redirect_uri'],
-    ['a secret method', { redirect_uris: ['https://a.test/cb'], token_endpoint_auth_method: 'client_secret_post' }, 'invalid_client_metadata'],
+    ['eleven redirect uris', { redirect_uris: Array.from({ length: 11 }, (_, i) => `https://a.test/cb${i}`) }, 'invalid_redirect_uri'],
   ])('refuses %s with %s', async (_n, body, error) => {
     const res = await reg(body)
     expect(res.status).toBe(400)
     expect((await json(res))['error']).toBe(error)
+  })
+
+  it('ignores what RFC 7591 lets a server ignore, and says what it registered: a secret method, grant and response types, scope, unknown fields, a bad logo, a long name', async () => {
+    const res = await reg({
+      client_name: 'N'.repeat(300), redirect_uris: ['http://localhost:35045/callback'], token_endpoint_auth_method: 'client_secret_basic',
+      grant_types: ['authorization_code', 'refresh_token', 'implicit'], response_types: ['code', 'token'], scope: 'read write nonsense', application_type: 'native',
+      client_uri: 'http://x.test', logo_uri: 'http://insecure.test/logo.png', contacts: ['a@b.test'], software_id: 'x', jwks_uri: 'https://x.test/jwks', surprise: { a: 1 },
+    })
+    expect(res.status).toBe(201)
+    const c = await json(res)
+    expect(c).toMatchObject({ token_endpoint_auth_method: 'none', grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'] })
+    expect(c['client_name']).toHaveLength(120)
+    expect(c).not.toHaveProperty('client_secret')
+  })
+
+  it('writes an oauth_register line for every answer: ok with the redirect hosts, refused with the reason and the field name', async () => {
+    process.env['AUTH_OAUTH_REGISTER_PER_MINUTE'] = '1000'
+    const fresh = createAuth({ kv: new InMemoryKv() as never })
+    const reg = (body: unknown) => fresh.fetch(new Request(`${ISSUER}/register`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }))
+    await reg({ client_name: 'Audited', redirect_uris: ['http://localhost:35045/callback', 'https://tool.example.test/secret/path?x=1'] })
+    expect(lastAudit('oauth_register')).toMatchObject({ outcome: 'ok', step: 'register', redirect_hosts: 'localhost:35045,tool.example.test', client_id: expect.stringMatching(/^bwc_/) })
+    expect(JSON.stringify(lastAudit('oauth_register'))).not.toContain('secret/path')
+    await reg({ client_name: 'x', redirect_uris: ['http://evil.example/cb?token=abc'] })
+    expect(lastAudit('oauth_register')).toMatchObject({ outcome: 'refused', reason: 'redirect_uri_not_allowed', field: 'redirect_uris', redirect_hosts: 'evil.example' })
+    expect(JSON.stringify(lastAudit('oauth_register'))).not.toContain('token=abc')
+    await reg({ client_name: 'x' })
+    expect(lastAudit('oauth_register')).toMatchObject({ outcome: 'refused', reason: 'redirect_uris_not_a_list_of_strings', field: 'redirect_uris' })
+    await fresh.fetch(new Request(`${ISSUER}/register`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: 'not json' }))
+    expect(lastAudit('oauth_register')).toMatchObject({ outcome: 'refused', reason: 'body_not_json_object' })
+    delete process.env['AUTH_OAUTH_REGISTER_PER_MINUTE']
   })
 
   it('is rate limited per address', async () => {

@@ -26,7 +26,7 @@ import { auditEnvelope, principalOf, type Principal } from '@baseworks/auth/prin
 
 export type AuditEvent =
   | 'sign_in' | 'sign_out' | 'sign_in_refused' | 'cli_approval' | 'exchange' | 'exchange_key' | 'service_token'
-  | 'oauth_authorize' | 'oauth_token'
+  | 'oauth_authorize' | 'oauth_token' | 'oauth_register'
 
 export interface AuditFields {
   outcome: 'ok' | 'refused'
@@ -57,13 +57,17 @@ export interface AuditFields {
   /** The grant (refresh chain) the event is about. Not a secret. */
   grant_id?: string
   scope?: string
+  /** A refused registration: the name of the offending field (never its value). */
+  field?: string
+  /** A registration: the hosts of its redirect URIs (never the paths or queries). */
+  redirect_hosts?: string
 }
 
 /** The only keys a line may have, in the order they are written. */
 const KEYS = [
   'outcome', 'reason', 'request_id', 'ip', 'user_agent',
   'kind', 'actor', 'actor_id', 'on_behalf_of', 'via', 'credential_id', 'client', 'org_id',
-  'email', 'client_id', 'degraded', 'step', 'resource', 'resource_sent', 'grant_id', 'scope',
+  'email', 'client_id', 'degraded', 'step', 'resource', 'resource_sent', 'grant_id', 'scope', 'field', 'redirect_hosts',
 ] as const
 
 /** A value that is a credential wherever it appears: a JWT, or an API token with more than its id. */
