@@ -26,6 +26,7 @@ import { auditEnvelope, principalOf, type Principal } from '@baseworks/auth/prin
 
 export type AuditEvent =
   | 'sign_in' | 'sign_out' | 'sign_in_refused' | 'cli_approval' | 'exchange' | 'exchange_key' | 'service_token'
+  | 'oauth_authorize' | 'oauth_token'
 
 export interface AuditFields {
   outcome: 'ok' | 'refused'
@@ -47,13 +48,22 @@ export interface AuditFields {
   client_id?: string
   /** `iam_sync_failed`: the sign-in went on with the provider's subject. */
   degraded?: string
+  /** What happened inside an event: `consent_shown`, `approved`, `code_exchanged`, `refreshed`, … */
+  step?: string
+  /** The MCP resource a token is for. */
+  resource?: string
+  /** `yes` | `no`: whether the client sent `resource` (RFC 8707) on this request. */
+  resource_sent?: string
+  /** The grant (refresh chain) the event is about. Not a secret. */
+  grant_id?: string
+  scope?: string
 }
 
 /** The only keys a line may have, in the order they are written. */
 const KEYS = [
   'outcome', 'reason', 'request_id', 'ip', 'user_agent',
   'kind', 'actor', 'actor_id', 'on_behalf_of', 'via', 'credential_id', 'client', 'org_id',
-  'email', 'client_id', 'degraded',
+  'email', 'client_id', 'degraded', 'step', 'resource', 'resource_sent', 'grant_id', 'scope',
 ] as const
 
 /** A value that is a credential wherever it appears: a JWT, or an API token with more than its id. */

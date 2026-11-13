@@ -16,6 +16,8 @@ export interface MintInput {
   sub: string
   type: IdentityType
   expires_in_seconds: number
+  /** Audience of this token when it is not the realm's (an MCP access token: the MCP server's URL). */
+  audience?: string
   /** Extra claims — a narrowed token's org and scope, for instance. */
   claims?: Record<string, unknown>
 }
@@ -32,7 +34,7 @@ export async function mintIdentityToken(input: MintInput): Promise<string | null
     return mintEs256(
       r.signing,
       { sub: input.sub, type: input.type, ...(input.claims ?? {}) },
-      { issuer: r.issuer, audience: r.audience, expires_in_seconds: input.expires_in_seconds },
+      { issuer: r.issuer, audience: input.audience ?? r.audience, expires_in_seconds: input.expires_in_seconds },
     )
   }
 
@@ -41,7 +43,7 @@ export async function mintIdentityToken(input: MintInput): Promise<string | null
     // running the previous release has never seen iss/aud and would reject a
     // token carrying them.
     return signHs256Jwt(
-      { sub: input.sub, type: input.type, ...(input.claims ?? {}) },
+      { sub: input.sub, type: input.type, ...(input.audience ? { aud: input.audience } : {}), ...(input.claims ?? {}) },
       r.legacy_secret,
       input.expires_in_seconds,
     )

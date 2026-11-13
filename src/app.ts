@@ -8,6 +8,7 @@ import { iamEnabled } from './lib/iam.js'
 import { realm } from './lib/realm.js'
 import { cliRouter } from './routes/cli.js'
 import { sessionRouter, signinRouter } from './routes/oidc.js'
+import { oauthRouter } from './routes/oauth.js'
 import { pagesRouter } from './routes/pages.js'
 import { tokensRouter } from './routes/tokens.js'
 
@@ -92,6 +93,7 @@ export function createApp(opts: AppOptions) {
           'service-token',
           'token-exchange',
           'api-token-exchange',
+          'oauth-authorization-server',
           // A product can send people to this service's own sign-in page
           // rather than drawing one.
           'login-page',
@@ -127,6 +129,11 @@ export function createApp(opts: AppOptions) {
   api.route('/', signinRouter({ dev }))
 
   app.route('/api', api)
+
+  // OAuth for MCP clients (workspace ADR 0006) at the ISSUER'S ROOT, because that is where a
+  // client looks (RFC 8414): `/.well-known/oauth-authorization-server`, `/authorize`, `/token`,
+  // `/register`, `/revoke`. The gateway routes them here; nothing else is mounted at the root.
+  app.route('/', oauthRouter(opts.kv))
 
   const ui = new Hono()
   ui.route('/', pagesRouter({ dev, kv: opts.kv }))

@@ -473,6 +473,46 @@ field. A test feeds every route a known secret and asserts that none appears in 
 Known limit: an audit line is best effort. If writing stdout fails the request still
 completes; nothing here can lose a sign-in because a log failed.
 
+## OAuth for MCP clients (2.6.0)
+
+auth-service is an **OAuth 2.1 authorization server** for MCP clients (workspace ADR 0006, MCP authorization
+specification 2026-07-28): Claude Code, Claude Desktop and claude.ai first. A consent becomes an **agent in
+iam** (`agent:<client>@<handle>`) with a rotating refresh token; the person sees and ends it on the Agents tab.
+
+| Where (the issuer's **root**) | What |
+|---|---|
+| `GET /.well-known/oauth-authorization-server` | RFC 8414 metadata: `S256`, `client_id_metadata_document_supported`, `authorization_response_iss_parameter_supported`, `none` and `private_key_jwt`, `registration_endpoint`, scopes `read`, `write`, `offline_access` |
+| `GET /authorize` | checks the client and the exact redirect URI (a loopback `localhost`/`127.0.0.1`/`[::1]` registration ignores the port), PKCE `S256` required, `resource` must be a known MCP server; signs the person in if needed; the **consent page** (client name, where they are sent, localhost warning, organization from their memberships, read or read+write, "acts as `agent:…`"); skips it when an identical grant exists; redirects with `code`, `state`, `iss` |
+| `POST /token` | form-urlencoded. `authorization_code` (`code_verifier`, `resource`); `refresh_token` (rotating; every failure is `invalid_grant`); `urn:ietf:params:oauth:grant-type:token-exchange` for the realm's MCP server |
+| `POST /register` | Dynamic Client Registration (RFC 7591): public clients, `https` or loopback `http` redirects, rate limited, kept by iam |
+| `POST /revoke` | RFC 7009; always 200 |
+
+These are at the root because that is where a client looks (RFC 8414): the gateway must route them here (broker
+0.8.20; an older one let `/auth` swallow `/authorize`). Everything else keeps its mounts.
+
+- **Clients**: a Client ID Metadata Document (`client_id` is an HTTPS URL, fetched through an **SSRF guard**: https
+  only, no redirects, the address is checked at connect time against private/loopback/link-local/metadata ranges,
+  5 s and 64 KB limits, cached by `Cache-Control` for at most an hour; the document's `client_id` must equal the URL
+  and it names redirect URIs, never a secret); a registered client (`bwc_…`); a pre-registered one
+  (`AUTH_OAUTH_CLIENTS`, JSON).
+- **Resources**: `AUTH_MCP_RESOURCES` (comma-separated MCP URLs; a manifest lookup replaces it later). A client that
+  omits `resource` gets the single URL when there is exactly one.
+- **Access token**: a realm JWT (ES256 only), `type: assistant`, `kind: agent`, `via: oauth`, `actor`,
+  `on_behalf_of`, `org_id`, `access`, `credential_id` (the grant), `client_id`, **`aud` = the MCP resource**, five
+  minutes. It is not a realm token: a realm service rejects it. The MCP server exchanges it (`/token`, RFC 8693,
+  authenticated with its own service token, `AUTH_OAUTH_EXCHANGERS`, default `mcp`) for a realm-audience token for the
+  same agent, never longer than the one it came from. Revocation takes effect at the next refresh or exchange: at most
+  five minutes.
+- **Refresh**: `bwr_…`, held by iam (hashed), rotated each use; reuse revokes the chain; 30 days idle, 90 absolute. It
+  is issued whether or not `offline_access` was asked for.
+- **State in this service's KV**: the authorization code (60 s, single use) and the pending consent (10 min). Nothing
+  durable.
+- **Audit lines** `oauth_authorize` (`consent_shown`, `approved`, `approved_remembered`, `consent_refused`,
+  `invalid_request`) and `oauth_token` (`code_exchanged`, `refreshed`, `refresh_reuse_detected`, `exchanged`,
+  `revoked`, refusals with a `reason`), with the client id, the resource, `resource_sent: yes|no` and the agent's
+  envelope. Never a code, verifier, token or request id.
+- Needs `IAM_SERVICE_URL`, the realm's signing key, and optionally `ORG_SERVICE_URL` (the person's organizations).
+
 ## Known gaps
 
 - **No revocation.** A token is valid until it expires; signing out clears cookies

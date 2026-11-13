@@ -44,7 +44,7 @@ export function layout(opts: { title: string; body: string; view: PageView }): s
 }
 
 /** Send a page, with the headers every page carries (no framing, no script, no cache). */
-export function respond(c: Context, html: string, status: 200 | 400 | 401 | 404 | 409 | 500 = 200): Response {
+export function respond(c: Context, html: string, status: 200 | 400 | 401 | 403 | 404 | 409 | 500 = 200): Response {
   for (const [name, value] of Object.entries(PAGE_HEADERS)) c.header(name, value)
   return c.html(html, status)
 }

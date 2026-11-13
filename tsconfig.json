@@ -12,6 +12,7 @@
     "src"
   ],
   "exclude": [
-    "src/__tests__/exchange-key.iam.test.ts"
+    "src/__tests__/exchange-key.iam.test.ts",
+    "src/__tests__/oauth.test.ts"
   ]
 }
