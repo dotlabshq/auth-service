@@ -14,6 +14,7 @@ export class InMemoryKv {
   async get(key: string) { return this.store.get(key) ?? null }
   async set(key: string, value: string, _opts?: { ttl?: number }) { this.store.set(key, value); return this }
   async del(key: string) { this.store.delete(key); return this }
+  async take(key: string) { const v = this.store.get(key) ?? null; this.store.delete(key); return v }
   _raw() { return this.store }
 }
 

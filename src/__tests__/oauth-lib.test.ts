@@ -3,7 +3,14 @@
  * match, which addresses a server must never fetch, and how a client is told apart
  * (Client ID Metadata Document, registered, pre-registered).
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { execFileSync } from 'node:child_process'
+import { mkdtempSync, readFileSync } from 'node:fs'
+import { createServer, type Server } from 'node:https'
+import { request as httpsRequest } from 'node:https'
+import type { AddressInfo } from 'node:net'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { redirectAllowed, redirectMatches, isLoopbackRedirect } from '../lib/oauth/redirect.js'
 import { FetchRefused, fetchJsonGuarded, isBlockedAddress } from '../lib/oauth/ssrf.js'
 import { lookupClient, setClientDocumentFetcher } from '../lib/oauth/clients.js'
@@ -52,16 +59,17 @@ describe('addresses a server must never fetch', () => {
   it.each([
     '127.0.0.1', '127.1.2.3', '0.0.0.0', '10.0.0.1', '10.255.255.255', '172.16.0.1', '172.31.255.255', '192.168.1.1', '169.254.169.254', '169.254.0.1',
     '100.64.0.1', '100.127.255.255', '224.0.0.1', '255.255.255.255', '192.0.0.1', '192.0.2.1', '198.18.0.1', '198.51.100.1', '203.0.113.1',
+    '::1.2.3.4', '::0102:0304', '::8.8.8.8', '0:0:0:0:0:0:808:808', '2002:7f00:1::', '2002:0a00:0001::1', '2002:a9fe:a9fe::1', '2001:0:4136:e378:8000:63bf:3fff:fdd2', '2001:0::1', '100::1', '100:0:0:0::ffff', '::',
     '::', '::1', 'fc00::1', 'fd12:3456::1', 'fe80::1', 'febf::1', 'ff02::1', '::ffff:127.0.0.1', '::ffff:10.0.0.1', '::ffff:169.254.169.254', '::ffff:7f00:1', '64:ff9b::1', '2001:db8::1', '[::1]', 'not-an-ip', '',
   ])('%s is blocked', (a) => { expect(isBlockedAddress(a)).toBe(true) })
 
-  it.each(['8.8.8.8', '1.1.1.1', '93.184.216.34', '172.15.0.1', '172.32.0.1', '100.63.255.255', '100.128.0.1', '169.253.0.1', '2606:4700:4700::1111', '2001:4860:4860::8888', '::ffff:8.8.8.8'])('%s is allowed', (a) => {
+  it.each(['8.8.8.8', '1.1.1.1', '93.184.216.34', '172.15.0.1', '172.32.0.1', '100.63.255.255', '100.128.0.1', '169.253.0.1', '2606:4700:4700::1111', '2001:4860:4860::8888', '::ffff:8.8.8.8', '2002:0808:0808::1', '2001:db9::1', '100:0:0:1::1'])('%s is allowed', (a) => {
     expect(isBlockedAddress(a)).toBe(false)
   })
 
   const refused = (url: string) => fetchJsonGuarded(url).then(() => 'fetched', (e) => (e instanceof FetchRefused ? e.code : `other:${e}`))
-  it('refuses a URL that is not plain https before any connection', async () => {
-    for (const url of ['http://example.com/c.json', 'ftp://example.com/c.json', 'https://user:pw@example.com/c.json', 'https://example.com/c.json#x', 'not a url', 'file:///etc/passwd']) {
+  it('refuses a URL that is not plain https on port 443 before any connection', async () => {
+    for (const url of ['https://example.com:8443/c.json', 'https://example.com:444/c.json', 'https://example.com:80/c.json', 'http://example.com/c.json', 'ftp://example.com/c.json', 'https://user:pw@example.com/c.json', 'https://example.com/c.json#x', 'not a url', 'file:///etc/passwd']) {
       expect(await refused(url), url).toBe('bad_url')
     }
   })
@@ -74,7 +82,7 @@ describe('addresses a server must never fetch', () => {
 
   it('refuses a NAME that resolves to a blocked address, at connect time (the check is on the address the socket would use)', async () => {
     expect(await refused('https://localhost/c.json')).toBe('blocked_address')
-    expect(await refused('https://localhost:8443/c.json')).toBe('blocked_address')
+    expect(await refused('https://localhost.localdomain/c.json')).toMatch(/blocked_address|network/)
   })
 })
 
@@ -145,5 +153,74 @@ describe('telling a client apart', () => {
 
   it('anything else is unknown: empty, an http URL, a bare name, a huge id', async () => {
     for (const id of ['', 'http://x.test/c', 'nobody', 'x'.repeat(3000)]) expect(await lookupClient(id), id.slice(0, 20)).toEqual({ ok: false, reason: 'unknown_client' })
+  })
+})
+
+
+// ── the response handling, against a live (local, self-signed) server ─────────
+
+const haveOpenssl = (() => { try { execFileSync('openssl', ['version'], { stdio: 'ignore' }); return true } catch { return false } })()
+
+describe.skipIf(!haveOpenssl)('the response handling, against a live server', () => {
+  let server: Server
+  let port = 0
+  let sockets: Array<{ destroy(): void }> = []
+  beforeAll(async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ssrf-'))
+    execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', join(dir, 'k.pem'), '-out', join(dir, 'c.pem'), '-days', '1', '-subj', '/CN=client.example.test'], { stdio: 'ignore' })
+    server = createServer({ key: readFileSync(join(dir, 'k.pem')), cert: readFileSync(join(dir, 'c.pem')) }, (req, res) => {
+      const path = new URL(req.url ?? '/', 'https://x').pathname
+      if (path === '/ok') { res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'max-age=60' }); return void res.end('{"client_id":"x"}') }
+      if (path === '/big') { res.writeHead(200); return void res.end(JSON.stringify({ pad: 'x'.repeat(200_000) })) }
+      if (path === '/text') { res.writeHead(200); return void res.end('<html>not json</html>') }
+      if (path === '/redirect') { res.writeHead(302, { location: 'https://169.254.169.254/latest/meta-data' }); return void res.end() }
+      if (path === '/404') { res.writeHead(404); return void res.end('{}') }
+      if (path === '/500') { res.writeHead(500); return void res.end('{}') }
+      if (path === '/hang') return void sockets.push(req.socket)
+      if (path === '/dribble') {
+        res.writeHead(200, { 'content-type': 'application/json' }); res.write('{"pad":"')
+        const t = setInterval(() => { if (!res.write('x')) clearInterval(t) }, 40)
+        res.on('close', () => clearInterval(t))
+        return
+      }
+      res.writeHead(200); res.end('{}')
+    })
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+    port = (server.address() as AddressInfo).port
+  })
+  afterAll(async () => { sockets.forEach((s) => s.destroy()); await new Promise((r) => server.close(r)) })
+
+  /** The test's way in: the URL says a public name on 443 (so the URL rules pass), the socket goes to the local server. */
+  const toLocal = ((url: URL, _opts: unknown, cb: never) =>
+    httpsRequest({ hostname: '127.0.0.1', port, path: `${url.pathname}${url.search}`, method: 'GET', headers: { host: url.host, accept: 'application/json' }, rejectUnauthorized: false }, cb)) as unknown as typeof httpsRequest
+  const get = (path: string, opts: { timeoutMs?: number; maxBytes?: number } = {}) =>
+    fetchJsonGuarded(`https://client.example.test${path}`, opts, { request: toLocal }).then((r) => r, (e) => (e instanceof FetchRefused ? e.code : `other:${e}`))
+
+  it('a good document: parsed, with its headers', async () => {
+    expect(await get('/ok')).toMatchObject({ json: { client_id: 'x' }, headers: { 'cache-control': 'max-age=60' } })
+  })
+  it('a document over the size limit is refused, not read to the end', async () => {
+    expect(await get('/big')).toBe('too_large')
+    expect(await get('/ok', { maxBytes: 5 })).toBe('too_large')
+  })
+  it('something that is not JSON is refused', async () => { expect(await get('/text')).toBe('not_json') })
+  it('a redirect is refused, not followed', async () => { expect(await get('/redirect')).toBe('bad_status') })
+  it('a status that is not 2xx is refused', async () => {
+    expect(await get('/404')).toBe('bad_status')
+    expect(await get('/500')).toBe('bad_status')
+  })
+  it('a server that never answers is cut off at the deadline', async () => {
+    const t0 = Date.now()
+    expect(await get('/hang', { timeoutMs: 300 })).toBe('timeout')
+    expect(Date.now() - t0).toBeLessThan(1500)
+  })
+  it('a server that dribbles bytes (never idle) is cut off at the same total deadline, not at the size limit or never', async () => {
+    const t0 = Date.now()
+    expect(await get('/dribble', { timeoutMs: 400, maxBytes: 10_000_000 })).toBe('timeout')
+    expect(Date.now() - t0).toBeLessThan(1500)
+  })
+  it('the default deadline is five seconds', async () => {
+    const src = readFileSync(new URL('../lib/oauth/ssrf.ts', import.meta.url), 'utf8')
+    expect(src).toMatch(/opts\.timeoutMs \?\? 5000/)
   })
 })

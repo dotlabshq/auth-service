@@ -2,13 +2,14 @@
  * Fetching a URL a stranger named, safely (a Client ID Metadata Document: the
  * client's `client_id` IS a URL it controls). The rules, each tested:
  *
- *  · `https` only, no credentials in the URL, a default port or 443-class, no redirect followed;
+ *  · `https` only, port 443 only, no credentials in the URL, no redirect followed;
  *  · the address the connection goes to is checked **at connect time** (a
  *    custom `lookup`), so a name that resolved to a public address a moment ago
  *    and to 169.254.169.254 now (DNS rebinding) is refused;
  *  · private, loopback, link-local, unique-local, multicast, reserved and
  *    metadata ranges, IPv4 and IPv6 (and IPv4-mapped IPv6), are refused;
- *  · a time limit and a size limit; JSON only.
+ *  · a **total** deadline (DNS, connect, headers and body together: a server that dribbles a byte at a
+ *    time cannot hold the request open) and a size limit; JSON only.
  */
 import { lookup as dnsLookup } from 'node:dns'
 import { request } from 'node:https'
@@ -19,6 +20,24 @@ export class FetchRefused extends Error {
     super(code)
     this.name = 'FetchRefused'
   }
+}
+
+/** An IPv6 address as eight 16-bit groups, or null. */
+function expand6(ip: string): number[] | null {
+  let s = ip
+  const v4 = /(\d+\.\d+\.\d+\.\d+)$/.exec(s)
+  if (v4) {
+    const [a, b, c, d] = v4[1]!.split('.').map(Number) as [number, number, number, number]
+    s = s.slice(0, -v4[1]!.length) + `${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`
+  }
+  const halves = s.split('::')
+  if (halves.length > 2) return null
+  const head = halves[0] ? halves[0].split(':') : []
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(':') : []
+  const fill = halves.length === 2 ? 8 - head.length - tail.length : 0
+  if (fill < 0) return null
+  const all = [...head, ...Array(fill).fill('0'), ...tail].map((x) => parseInt(x || '0', 16))
+  return all.length === 8 && all.every((x) => Number.isFinite(x)) ? all : null
 }
 
 /** True for an address a server must never fetch from on a stranger's say-so. */
@@ -40,6 +59,15 @@ export function isBlockedAddress(address: string): boolean {
   }
   if (v === 6) {
     if (ip === '::' || ip === '::1') return true
+    const g = expand6(ip)
+    if (g) {
+      // IPv4-compatible (`::a.b.c.d`, `::xxxx:xxxx`, deprecated): the first 96 bits are zero.
+      if (g.slice(0, 6).every((x) => x === 0)) return true
+      // 6to4 (2002::/16) carries an IPv4 address: judged by it. Teredo (2001::/32) and the discard prefix (100::/64) are never fetched.
+      if (g[0] === 0x2002) return isBlockedAddress(`${g[1]! >> 8}.${g[1]! & 255}.${g[2]! >> 8}.${g[2]! & 255}`)
+      if (g[0] === 0x2001 && g[1] === 0) return true
+      if (g[0] === 0x100 && g[1] === 0 && g[2] === 0 && g[3] === 0) return true
+    }
     const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(ip)
     if (mapped) return isBlockedAddress(mapped[1]!)
     const hex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(ip)
@@ -60,21 +88,25 @@ export function isBlockedAddress(address: string): boolean {
 
 export interface FetchOptions { timeoutMs?: number; maxBytes?: number }
 
-/** What a tests may replace: the real fetch is below. */
-export type JsonFetcher = (url: string, opts?: FetchOptions) => Promise<{ json: unknown; headers: Record<string, string> }>
+/** What a test may replace to put the response handling in front of a live server. Not used in production. */
+export interface FetchDeps { request?: typeof request }
 
-export const fetchJsonGuarded: JsonFetcher = (rawUrl, opts = {}) => {
+/** What a tests may replace: the real fetch is below. */
+export type JsonFetcher = (url: string, opts?: FetchOptions, deps?: FetchDeps) => Promise<{ json: unknown; headers: Record<string, string> }>
+
+export const fetchJsonGuarded: JsonFetcher = (rawUrl, opts = {}, deps = {}) => {
   const timeoutMs = opts.timeoutMs ?? 5000
   const maxBytes = opts.maxBytes ?? 64 * 1024
   let url: URL
   try { url = new URL(rawUrl) } catch { return Promise.reject(new FetchRefused('bad_url')) }
-  if (url.protocol !== 'https:' || url.username || url.password || url.hash) return Promise.reject(new FetchRefused('bad_url'))
+  if (url.protocol !== 'https:' || url.username || url.password || url.hash || (url.port !== '' && url.port !== '443')) return Promise.reject(new FetchRefused('bad_url'))
   if (isIP(url.hostname.replace(/^\[|\]$/g, '')) && isBlockedAddress(url.hostname)) return Promise.reject(new FetchRefused('blocked_address'))
 
   return new Promise((resolve, reject) => {
     let settled = false
-    const done = (fn: () => void) => { if (!settled) { settled = true; fn() } }
-    const req = request(url, {
+    let deadline: ReturnType<typeof setTimeout> | undefined
+    const done = (fn: () => void) => { if (!settled) { settled = true; if (deadline) clearTimeout(deadline); fn() } }
+    const req = (deps.request ?? request)(url, {
       method: 'GET',
       headers: { accept: 'application/json', 'user-agent': 'baseworks-auth-service/oauth-cimd' },
       timeout: timeoutMs,
@@ -111,6 +143,9 @@ export const fetchJsonGuarded: JsonFetcher = (rawUrl, opts = {}) => {
       })
       res.on('error', () => done(() => reject(new FetchRefused('network'))))
     })
+    // One clock for the whole thing. The socket's own `timeout` only measures silence, which a slow
+    // server can avoid for as long as it likes.
+    deadline = setTimeout(() => { req.destroy(); done(() => reject(new FetchRefused('timeout'))) }, timeoutMs)
     req.on('timeout', () => { req.destroy(); done(() => reject(new FetchRefused('timeout'))) })
     req.on('error', (e) => done(() => reject(e instanceof FetchRefused ? e : (e as { code?: string }).code === 'ERR_BLOCKED' ? new FetchRefused('blocked_address') : new FetchRefused(/blocked_address/.test(String(e.message)) ? 'blocked_address' : 'network'))))
     req.end()

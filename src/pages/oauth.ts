@@ -12,7 +12,8 @@ import { strings } from './strings.js'
 export interface ConsentView {
   view: PageView
   client_name: string
-  logo_uri: string | null
+  /** The host of the client's id (a Client ID Metadata Document URL), shown beside its name; null for a registered client. */
+  client_host: string | null
   /** Host of the redirect URI the client asked for, shown in plain sight. */
   redirect_host: string
   /** Every registered redirect URI is on this computer: say so. */
@@ -24,6 +25,8 @@ export interface ConsentView {
   may_write: boolean
   /** `agent:<name>@<handle>`. */
   actor: string
+  /** The organization chosen last time, selected again. */
+  remembered_org?: string | null
   /** The id the form posts back, tying the answer to this request and this person. */
   req: string
 }
@@ -33,13 +36,13 @@ export function consentPage(v: ConsentView): string {
   const t = strings(v.view.lang)
   const product = v.view.brand.name
   const orgs = v.orgs.length
-    ? `<label>${t('oauthOrg')} <select name="org_id" required>${v.orgs.map((o, i) => `<option value="${e(o.id)}"${i === 0 ? ' selected' : ''}>${e(o.name)}</option>`).join('')}</select></label>`
+    ? `<label>${t('oauthOrg')} <select name="org_id" required>${v.orgs.map((o, i) => `<option value="${e(o.id)}"${(v.remembered_org ? o.id === v.remembered_org : i === 0) ? ' selected' : ''}>${e(o.name)}</option>`).join('')}</select></label>`
     : `<p class="quiet">${t('oauthNoOrg')}</p>`
   return layout({
     title: t('oauthTitle', { client: v.client_name }),
     view: v.view,
-    body: `    ${v.logo_uri ? `<p><img src="${e(v.logo_uri)}" alt="" width="48" height="48"></p>` : ''}
-    <h1>${t('oauthTitle', { client: v.client_name })}</h1>
+    body: `    <h1>${t('oauthTitle', { client: v.client_name })}</h1>
+    ${v.client_host ? `<p class="quiet">${t('oauthClientHost', { host: v.client_host })}</p>` : ''}
     <p>${t('oauthIntro', { client: v.client_name, product })}</p>
     <p>${t('oauthRedirect', { host: v.redirect_host })}</p>
     ${v.localhost_only ? `<p class="error" role="alert">${t('oauthLocalhost')}</p>` : ''}

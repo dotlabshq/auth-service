@@ -507,7 +507,7 @@ On Flect, an `expose` entry for `/.well-known/oauth-authorization-server/v1/auth
 
 - **Clients**: a Client ID Metadata Document (`client_id` is an HTTPS URL, fetched through an **SSRF guard**: https
   only, no redirects, the address is checked at connect time against private/loopback/link-local/metadata ranges,
-  5 s and 64 KB limits, cached by `Cache-Control` for at most an hour; the document's `client_id` must equal the URL
+  a **total** 5 s deadline (DNS, connect, headers and body: a server that dribbles bytes is cut off) and a 64 KB limit, port 443 only, cached by `Cache-Control` for at most an hour; the document's `client_id` must equal the URL
   and it names redirect URIs, never a secret); a registered client (`bwc_…`); a pre-registered one
   (`AUTH_OAUTH_CLIENTS`, JSON).
 - **Resources**: `AUTH_MCP_RESOURCES` (comma-separated MCP URLs: the realm's own and each product's; a manifest lookup replaces
@@ -528,6 +528,20 @@ On Flect, an `expose` entry for `/.well-known/oauth-authorization-server/v1/auth
   `invalid_request`) and `oauth_token` (`code_exchanged`, `refreshed`, `refresh_reuse_detected`, `exchanged`,
   `revoked`, refusals with a `reason`), with the client id, the resource, `resource_sent: yes|no` and the agent's
   envelope. Never a code, verifier, token or request id.
+- **Consent is remembered only for https callbacks** (2.6.1). A grant identical to a live one (same person, client, resource,
+  organization, access) skips the page only when this request's `redirect_uri` is https and not loopback. A loopback redirect
+  is a program on the person's computer, which anything can claim to be by naming a public client's id (RFC 8252 §8.6, OAuth 2.1
+  §7.5): it always sees the page, with the remembered organization selected.
+- **Who asks must be an iam user.** A session left over from a degraded sign-in names only the provider's subject; `/authorize`
+  refuses it (403, the "another person" page).
+- **Authorization codes are taken atomically** (KV `take`: Redis `GETDEL`, a synchronous take in the in-process store): of two
+  redemptions at once one gets the code. A code presented again after it was redeemed revokes the grant it produced
+  (`oauth_token` step `code_reuse_detected`).
+- **No remote logo.** The consent page shows the client's name and the host of its `client_id`, never an `<img>` from the client's
+  server: that would tell it who is looking at a consent page.
+- **Dynamic Client Registration is capped globally per hour in iam** (`IAM_OAUTH_REGISTER_PER_HOUR`): a flood of registrations
+  blocks new registrations for everyone for that hour (Client ID Metadata Document clients and already registered clients are
+  unaffected). The per-address limit on `/register` in this service trusts `X-Forwarded-For`, which only the gateway may set.
 - Needs `IAM_SERVICE_URL`, the realm's signing key, and optionally `ORG_SERVICE_URL` (the person's organizations).
 
 ## Known gaps

@@ -13,6 +13,20 @@ export interface KvClient {
   get(key: string): Promise<string | null>
   set(key: string, value: string, opts?: { ttl?: number }): Promise<void>
   del(key: string): Promise<void>
+  /**
+   * Read a key and remove it in one step: of two callers at once, one gets the value
+   * and the other gets null (Redis GETDEL; the in-process store does it without yielding).
+   * Anything that must be used once — an authorization code — is taken, never read then deleted.
+   */
+  take?(key: string): Promise<string | null>
+}
+
+/** `kv.take` where there is one; read-then-delete where there is not (not atomic: only for a KV that cannot do better). */
+export async function kvTake(kv: KvClient, key: string): Promise<string | null> {
+  if (kv.take) return kv.take(key)
+  const v = await kv.get(key)
+  if (v !== null) await kv.del(key)
+  return v
 }
 
 export function kvAdapter(redis: Redis): KvClient {
@@ -25,6 +39,7 @@ export function kvAdapter(redis: Redis): KvClient {
     del: async (key) => {
       await redis.del(key)
     },
+    take: (key) => redis.getdel(key),
   }
 }
 
@@ -56,6 +71,12 @@ export function memoryKvAdapter(nowMs: () => number = () => Date.now()): KvClien
     },
     del: async (key) => {
       store.delete(key)
+    },
+    // No await between the read and the delete: nothing else runs in between.
+    take: async (key) => {
+      const v = live(key)?.value ?? null
+      store.delete(key)
+      return v
     },
   }
 }

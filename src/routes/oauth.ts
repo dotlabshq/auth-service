@@ -23,7 +23,7 @@ import { Hono, type Context } from 'hono'
 import { createLocalJWKSet, jwtVerify, type JSONWebKeySet } from 'jose'
 import { verifier } from '@baseworks/auth/identity'
 import { principalOf } from '@baseworks/auth/principal'
-import type { KvClient } from '../db/client.js'
+import { kvTake, type KvClient } from '../db/client.js'
 import { audit, envelopeOf, personEnvelope, request, type AuditFields } from '../lib/audit.js'
 import { parseSession } from '../lib/cookies.js'
 import { ACCESS_TOKEN_SECONDS, SCOPES, endpoints, exchangers, issuerUrl, knownResources } from '../lib/oauth/config.js'
@@ -77,6 +77,11 @@ interface CodeRecord {
 }
 
 /** A rate limit that remembers nothing durable: per key, per minute. */
+/** Where the client says it is, for the person to read: the host of its client_id when that is a URL. */
+function clientHost(client: OAuthClientInfo): string | null {
+  try { return client.client_id.startsWith('https://') ? new URL(client.client_id).host : null } catch { return null }
+}
+
 function limiter(max: number, windowMs = 60_000) {
   const seen = new Map<string, number[]>()
   return (key: string): boolean => {
@@ -200,7 +205,14 @@ export function oauthRouter(kv: KvClient) {
     const may_write = scope.includes('write')
     const access: Array<'read' | 'write'> = may_write ? ['read', 'write'] : ['read']
 
-    // 4. Asked before? An identical grant, for the one organization it could be, is not asked again.
+    // 4. Who is this, really: an iam user (a session left over from a degraded sign-in names only the provider's subject).
+    const known = await iamOauth('POST', '/preview', { user_id, client_id: client.client_id, client_name: client.client_name })
+    if (known.status !== 200) { refuseShown(known.status === 404 ? 'person_not_in_iam' : 'iam_unavailable', client.client_id); return respond(c, oauthProblemPage(v, 'person'), 403) }
+    const actor = (known.data as { actor?: string }).actor!
+
+    // 5. Asked before? Only a request that comes back to an https address is not asked again. A loopback
+    //    redirect is a program on this computer, which anything can claim to be (RFC 8252 §8.6, OAuth 2.1 §7.5):
+    //    it always sees the page, with what the person chose last time already selected.
     const orgs = await membershipsOf(user_id)
     const candidates: Array<string | null> = orgs.length ? orgs.map((o) => o.id) : [null]
     const found: Array<string | null> = []
@@ -208,16 +220,15 @@ export function oauthRouter(kv: KvClient) {
       const r = await iamOauth<{ grant: unknown }>('POST', '/grants/find', { user_id, client_id: client.client_id, resource, org_id, access })
       if (r.status === 200 && r.data.grant) found.push(org_id)
     }
-    if (found.length === 1 && (orgs.length <= 1 || found.length === 1)) return issueCode(c, pending, client, found[0]!, access, 'approved_remembered')
+    const remembered = found.length === 1 ? found[0]! : undefined
+    if (found.length === 1 && !isLoopbackRedirect(redirect_uri)) return issueCode(c, pending, client, remembered ?? null, access, 'approved_remembered')
 
-    // 5. Ask. The pending request is remembered under an id only this person's session can answer.
+    // 6. Ask. The pending request is remembered under an id only this person's session can answer.
     const id = random(24)
     await kv.set(`oauth:req:${id}`, JSON.stringify(pending), { ttl: REQ_TTL })
-    const preview = await iamOauth<{ actor?: string }>('POST', '/preview', { user_id, client_id: client.client_id, client_name: client.client_name })
-    const actor = preview.data.actor ?? `agent:${client.client_name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}@you`
     audit('oauth_authorize', { ...req, outcome: 'ok', step: 'consent_shown', client: 'ui', ...personEnvelope(user_id), client_id: client.client_id, resource, resource_sent: sent ? 'yes' : 'no', scope: scope.join(' ') })
     return respond(c, consentPage({
-      view: v, client_name: client.client_name, logo_uri: client.logo_uri, redirect_host: new URL(redirect_uri).host,
+      view: v, client_name: client.client_name, client_host: clientHost(client), redirect_host: new URL(redirect_uri).host, remembered_org: remembered ?? null,
       localhost_only: client.redirect_uris.every(isLoopbackRedirect), resource, orgs, may_write, actor, req: id,
     }))
   })
@@ -315,10 +326,18 @@ export function oauthRouter(kv: KvClient) {
 
     if (grant_type === GRANT_CODE) {
       const code = str('code')
-      const raw = code ? await kv.get(`oauth:code:${code}`) : null
-      // Single use: gone before anything is checked, so a wrong verifier burns the code too.
-      if (code) await kv.del(`oauth:code:${code}`)
-      if (!raw) return refuse(400, 'invalid_grant', 'code_unknown_or_used', { client_id: client.client_id })
+      // Single use, and atomic: of two redemptions at once exactly one gets the record. Gone before anything
+      // is checked, so a wrong verifier burns the code too.
+      const raw = code ? await kvTake(kv, `oauth:code:${code}`) : null
+      if (!raw) {
+        // A code that WAS redeemed, presented again: somebody holds a copy. What it produced is revoked (OAuth 2.1 §4.1.3).
+        const used = code ? await kv.get(`oauth:used:${sha256b64(code)}`) : null
+        if (used) {
+          await iamOauth('POST', `/grants/${encodeURIComponent(used)}/revoke`, {})
+          return refuse(400, 'invalid_grant', 'code_reuse_grant_revoked', { client_id: client.client_id, grant_id: used, step: 'code_reuse_detected' })
+        }
+        return refuse(400, 'invalid_grant', 'code_unknown_or_used', { client_id: client.client_id })
+      }
       const rec = JSON.parse(raw) as CodeRecord
       if (rec.client_id !== client.client_id) return refuse(400, 'invalid_grant', 'client_mismatch', { client_id: client.client_id })
       if (str('redirect_uri') && str('redirect_uri') !== rec.redirect_uri) return refuse(400, 'invalid_grant', 'redirect_mismatch', { client_id: client.client_id })
@@ -332,6 +351,7 @@ export function oauthRouter(kv: KvClient) {
       if (made.status === 0 || made.status >= 500) return refuse(502, 'server_error', 'iam_unavailable', { client_id: client.client_id })
       if (made.status !== 201 || !made.data.grant || !made.data.refresh_token) return refuse(400, 'invalid_grant', `grant_${made.data.error ?? made.status}`, { client_id: client.client_id })
       const g = made.data.grant
+      await kv.set(`oauth:used:${sha256b64(code)}`, g.id, { ttl: CODE_TTL })
       const token = await mintFor(g, rec.resource, ACCESS_TOKEN_SECONDS)
       if (!token) return oauthError(c, 500, 'server_error')
       audit('oauth_token', { ...req, outcome: 'ok', step: 'code_exchanged', ...agentEnvelope(g), client_id: client.client_id, resource: rec.resource, resource_sent: given ? 'yes' : 'no', grant_id: g.id, scope: rec.scope })

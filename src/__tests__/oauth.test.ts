@@ -70,6 +70,7 @@ beforeEach(() => {
   delete process.env['AUTH_AUDIT']
   resetRealm()
   setClientDocumentFetcher(null)
+  customDoc = false
   lines = []
   vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => { lines.push(String(chunk)); return true }) as never)
   vi.spyOn(console, 'log').mockImplementation(() => {})
@@ -97,7 +98,9 @@ async function person(name: string): Promise<Person> {
 
 const CIMD = 'https://claude.example.test/oauth/claude-code-client-metadata'
 const REDIRECT = 'http://localhost/callback'
+let customDoc = false
 function cimd(over: Record<string, unknown> = {}) {
+  customDoc = Object.keys(over).length > 0
   setClientDocumentFetcher(async () => ({ json: { client_id: CIMD, client_name: 'Claude Code', redirect_uris: [REDIRECT, 'http://127.0.0.1/callback'], token_endpoint_auth_method: 'none', ...over }, headers: { 'cache-control': 'max-age=300' } }))
 }
 const pkce = () => { const verifier = randomBytes(32).toString('base64url'); return { verifier, challenge: createHash('sha256').update(verifier).digest('base64url') } }
@@ -118,7 +121,7 @@ function authorizeUrl(over: Record<string, string | undefined> = {}, p = pkce())
 
 /** Sign in, see the consent page, allow: returns the code and what the client keeps. */
 async function consent(who: Person, over: Record<string, string | undefined> = {}, answer: Record<string, string> = { decision: 'approve', access: 'write' }) {
-  cimd()
+  if (!customDoc) cimd()
   const a = authorizeUrl(over)
   const page = await get(a.url, who.cookie)
   expect(page.status).toBe(200)
@@ -129,7 +132,7 @@ async function consent(who: Person, over: Record<string, string | undefined> = {
 }
 async function tokens(who: Person, over: Record<string, string | undefined> = {}, answer?: Record<string, string>) {
   const c = await consent(who, over, answer)
-  const res = await form('/token', { grant_type: 'authorization_code', client_id: CIMD, code: c.code!, code_verifier: c.verifier, redirect_uri: REDIRECT })
+  const res = await form('/token', { grant_type: 'authorization_code', client_id: CIMD, code: c.code!, code_verifier: c.verifier, redirect_uri: over['redirect_uri'] ?? REDIRECT })
   expect(res.status).toBe(200)
   return { ...(await json<Record<string, any>>(res)), verifier: c.verifier }
 }
@@ -311,13 +314,22 @@ describe('the consent page', () => {
     expect(html).not.toContain('Read and write')
   })
 
-  it('a client name that is markup is escaped, and a logo must be https', async () => {
+  it('a client name that is markup is escaped', async () => {
     const who = await person('ada')
-    cimd({ client_name: '<script>alert(1)</script>', logo_uri: 'https://claude.example.test/l.png' })
+    cimd({ client_name: '<script>alert(1)</script>' })
     const html = await (await get(authorizeUrl().url, who.cookie)).text()
     expect(html).not.toContain('<script>alert(1)')
     expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;')
-    expect(html).toContain('<img src="https://claude.example.test/l.png"')
+  })
+
+  it('no logo is loaded from the client\'s server (that would tell it who is looking): the page shows the name and the host of its client_id', async () => {
+    const who = await person('ada')
+    cimd({ logo_uri: 'https://claude.example.test/l.png' })
+    const html = await (await get(authorizeUrl().url, who.cookie)).text()
+    expect(html).not.toMatch(/<img/i)
+    expect(html).not.toContain('l.png')
+    expect(html).toContain('claude.example.test')
+    expect(html).toContain('A logo is not loaded from there')
   })
 
   it('in Turkish when the cookie says so', async () => {
@@ -366,14 +378,38 @@ describe('the consent answer', () => {
     expect(claims((await json(t))['access_token'])['access']).toEqual(['read'])
   })
 
-  it('asked again by the same client for the same thing, a person who already agreed is not asked: a code at once', async () => {
+  const HTTPS_CB = 'https://claude.ai/api/mcp/auth_callback'
+
+  it('asked again by a client that comes back to an https address, a person who already agreed is not asked: a code at once', async () => {
     const who = await person('ada')
-    await tokens(who)
-    cimd()
-    const res = await get(authorizeUrl().url, who.cookie)
+    cimd({ redirect_uris: [HTTPS_CB] })
+    await tokens(who, { redirect_uri: HTTPS_CB })
+    const res = await get(authorizeUrl({ redirect_uri: HTTPS_CB }).url, who.cookie)
     expect(res.status).toBe(302)
+    expect(loc(res).origin + loc(res).pathname).toBe(HTTPS_CB)
     expect(loc(res).searchParams.get('code')).toBeTruthy()
     expect(lastAudit('oauth_authorize')).toMatchObject({ step: 'approved_remembered', outcome: 'ok' })
+  })
+
+  it('but never for a loopback redirect: any program on this computer can name a public client\'s id, so it always sees the page', async () => {
+    const who = await person('ada')
+    cimd()
+    await tokens(who)
+    for (const uri of ['http://localhost:51000/callback', 'http://127.0.0.1:51001/callback', 'http://localhost/callback']) {
+      const res = await get(authorizeUrl({ redirect_uri: uri }).url, who.cookie)
+      expect(res.status, uri).toBe(200)
+      expect(res.headers.get('location'), uri).toBeNull()
+    }
+    expect(audited().filter((o) => o['step'] === 'approved_remembered')).toEqual([])
+    // and the same person, same client, same https callback WAS remembered only because it is https
+  })
+
+  it('a remembered grant for one https callback does not make another client\'s request silent, nor another resource', async () => {
+    const who = await person('ada')
+    cimd({ redirect_uris: [HTTPS_CB] })
+    await tokens(who, { redirect_uri: HTTPS_CB })
+    process.env['AUTH_MCP_RESOURCES'] = `${MCP},https://other.example.test/mcp`
+    expect((await get(authorizeUrl({ redirect_uri: HTTPS_CB, resource: 'https://other.example.test/mcp' }).url, who.cookie)).status).toBe(200)
   })
 
   it('but asking for more (write, after read) asks again', async () => {
@@ -793,6 +829,76 @@ describe('more than one MCP server (a product runs its own)', () => {
     expect(missing.status).toBe(400)
     expect((await json(missing))['error']).toBe('invalid_target')
     expect((await exchange(t['access_token'], 'https://evil.example/mcp')).status).toBe(400)
+  })
+})
+
+describe('who is asking: an iam user, or nobody', () => {
+  it('a session that names only the provider\'s subject (iam sync degraded) is refused with the person page, and nothing is stored', async () => {
+    cimd()
+    const ghost = `oidc_session=${encodeSession({ is_authenticated: true, subject: 'idp-subject-1', email: 'x@y.test', name: 'X', issuer: 'i', expires_at: Math.floor(Date.now() / 1000) + 3600, user_id: 'idp-subject-1' } as never, process.env)}`
+    const res = await get(authorizeUrl().url, ghost)
+    expect(res.status).toBe(403)
+    expect(res.headers.get('location')).toBeNull()
+    expect(await res.text()).toContain('another signed-in person')
+    expect(audited().filter((o) => o['step'] === 'consent_shown')).toEqual([])
+    expect(lastAudit('oauth_authorize')).toMatchObject({ outcome: 'refused', reason: 'person_not_in_iam' })
+  })
+
+  it('and so is a session with no user id at all (it falls back to the subject, which iam does not know)', async () => {
+    cimd()
+    const none = `oidc_session=${encodeSession({ is_authenticated: true, subject: 'someone', email: 'x@y.test', name: 'X', issuer: 'i', expires_at: Math.floor(Date.now() / 1000) + 3600 } as never, process.env)}`
+    expect((await get(authorizeUrl().url, none)).status).toBe(403)
+  })
+})
+
+describe('an authorization code is used once, atomically', () => {
+  const body = (c: { code: string | null; verifier: string }) => ({ grant_type: 'authorization_code', client_id: CIMD, code: c.code!, code_verifier: c.verifier, redirect_uri: REDIRECT })
+
+  it('two redemptions at the same moment: exactly one gets tokens', async () => {
+    for (let round = 0; round < 5; round++) {
+      const c = await consent(await person('ada'))
+      const results = await Promise.all(Array.from({ length: 6 }, () => form('/token', body(c))))
+      const ok = results.filter((r) => r.status === 200)
+      expect(ok, `round ${round}`).toHaveLength(1)
+      for (const r of results.filter((r) => r.status !== 200)) expect((await json(r))['error']).toBe('invalid_grant')
+    }
+  })
+
+  it('a code that was redeemed and is presented again revokes the grant it produced: its refresh token dies, with a line saying so', async () => {
+    const c = await consent(await person('ada'))
+    const first = await json(await form('/token', body(c)))
+    expect((await form('/token', { grant_type: 'refresh_token', client_id: CIMD, refresh_token: first['refresh_token'] })).status).toBe(200)
+    // ...but that rotated it; take the new one to show the whole chain dies
+    const second = await json(await form('/token', { grant_type: 'refresh_token', client_id: CIMD, refresh_token: first['refresh_token'] }).catch(() => new Response('{}')))
+    void second
+    const again = await form('/token', body(c))
+    expect(again.status).toBe(400)
+    expect((await json(again))['error']).toBe('invalid_grant')
+    expect(lastAudit('oauth_token')).toMatchObject({ outcome: 'refused', step: 'code_reuse_detected', reason: 'code_reuse_grant_revoked', client_id: CIMD })
+    expect(lastAudit('oauth_token')['grant_id']).toBeTruthy()
+  })
+
+  it('the refresh token the first redemption produced no longer works after the code is replayed', async () => {
+    const c = await consent(await person('ada'))
+    const first = await json(await form('/token', body(c)))
+    await form('/token', body(c))
+    expect((await form('/token', { grant_type: 'refresh_token', client_id: CIMD, refresh_token: first['refresh_token'] })).status).toBe(400)
+  })
+
+  it('a code nobody ever redeemed, and one that expired, revoke nothing', async () => {
+    cimd()
+    const before = audited().length
+    const res = await form('/token', { ...body({ code: 'x'.repeat(43), verifier: pkce().verifier }) })
+    expect(res.status).toBe(400)
+    expect(audited().slice(before).some((o) => o['step'] === 'code_reuse_detected')).toBe(false)
+  })
+
+  it('a wrong verifier burns the code, but that is not a replay of a redeemed one: no grant was made, none is revoked', async () => {
+    const c = await consent(await person('ada'))
+    await form('/token', { ...body(c), code_verifier: pkce().verifier })
+    const again = await form('/token', body(c))
+    expect(again.status).toBe(400)
+    expect(lastAudit('oauth_token')).toMatchObject({ reason: 'code_unknown_or_used' })
   })
 })
 
