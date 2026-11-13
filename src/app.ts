@@ -125,15 +125,14 @@ export function createApp(opts: AppOptions) {
   api.route('/', sessionRouter({ dev, sso: signin.sso }))
   api.route('/', cliRouter(opts.kv))
   api.route('/', tokensRouter())
+  // OAuth for MCP clients (workspace ADR 0006): metadata, /authorize, /token, /register, /revoke,
+  // published with the rest of the API at `/v1/auth`.
+  api.route('/', oauthRouter(opts.kv))
   // Deprecated: the sign-in navigations at their pre-2.0 addresses.
   api.route('/', signinRouter({ dev }))
 
   app.route('/api', api)
 
-  // OAuth for MCP clients (workspace ADR 0006) at the ISSUER'S ROOT, because that is where a
-  // client looks (RFC 8414): `/.well-known/oauth-authorization-server`, `/authorize`, `/token`,
-  // `/register`, `/revoke`. The gateway routes them here; nothing else is mounted at the root.
-  app.route('/', oauthRouter(opts.kv))
 
   const ui = new Hono()
   ui.route('/', pagesRouter({ dev, kv: opts.kv }))

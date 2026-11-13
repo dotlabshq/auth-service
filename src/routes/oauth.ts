@@ -9,8 +9,10 @@
  *   POST /register                                  Dynamic Client Registration (RFC 7591)
  *   POST /revoke                                    RFC 7009
  *
- * These are at the issuer's root, not under `/api` or `/ui`: that is where a client
- * looks (RFC 8414), so the gateway routes them to this service (broker 0.8.20).
+ * They are on this service's API mount (published at `/v1/auth`), with absolute URLs in
+ * the metadata. The issuer may carry that path (`AUTH_ISSUER=https://host/v1/auth`); the
+ * gateway then maps `/.well-known/oauth-authorization-server/v1/auth` on the web host to
+ * this service's `/api/.well-known/oauth-authorization-server` (RFC 8414 path insertion).
  *
  * A grant is an agent in iam; auth keeps only short-lived codes and the pending
  * consent in its KV. The access token is a realm JWT, `kind: agent`, `via: oauth`,
@@ -190,9 +192,8 @@ export function oauthRouter(kv: KvClient) {
     // 3. Who is the person. Not signed in: sign in, and come back to this exact request.
     const session = parseSession(c)
     if (!session?.is_authenticated) {
-      const origin = issuerUrl()
-      const here = `${new URL(c.req.url).pathname}${new URL(c.req.url).search}`
-      return c.redirect(publicUrls().ui(`/login?returnTo=${encodeURIComponent(origin ? `${origin}${here}` : here)}`))
+      // Back to this exact request, at the address the browser knows it by.
+      return c.redirect(publicUrls().ui(`/login?returnTo=${encodeURIComponent(`${publicUrls().api('/authorize')}${new URL(c.req.url).search}`)}`))
     }
     const user_id = session.user_id ?? session.subject
     const pending: PendingRequest = { user_id, client_id: client.client_id, redirect_uri, state, code_challenge: challenge, resource, scope, resource_sent: sent }
@@ -376,11 +377,13 @@ export function oauthRouter(kv: KvClient) {
     if (str('subject_token_type') !== ACCESS_TOKEN_TYPE) return refuse(400, 'invalid_request', 'subject_token_type')
     const target = str('audience') || (r.audience ?? '')
     if (target && target !== r.audience) return refuse(400, 'invalid_target', 'audience_is_the_realm_only')
-    let claims = null
-    for (const res of knownResources()) {
-      claims = await verifier({ ...(r.jwks ? { jwks: r.jwks } : {}), issuer: r.issuer, audience: res })(str('subject_token'))
-      if (claims) break
-    }
+    // The caller says which MCP server it is (`resource`): the token must have been made for that one
+    // and no other. With a single known resource it may be left out.
+    const known = knownResources()
+    const named = str('resource') ? norm(str('resource')) : ''
+    if (named && !known.includes(named)) return refuse(400, 'invalid_target', 'unknown_resource')
+    if (!named && known.length > 1) return refuse(400, 'invalid_target', 'resource_required')
+    const claims = known.length === 0 ? null : await verifier({ ...(r.jwks ? { jwks: r.jwks } : {}), issuer: r.issuer, audience: named || known[0]! })(str('subject_token'))
     if (!claims || claims['via'] !== 'oauth' || claims['kind'] !== 'agent' || typeof claims['credential_id'] !== 'string') return refuse(400, 'invalid_grant', 'subject_token_invalid')
     const remaining = Math.floor(((claims.exp ?? 0) * 1000 - Date.now()) / 1000)
     if (remaining < 1) return refuse(400, 'invalid_grant', 'subject_token_expired')

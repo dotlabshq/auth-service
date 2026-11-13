@@ -6,7 +6,6 @@
  *                           A manifest lookup replaces it later; a client that omits `resource`
  *                           gets the one URL when there is exactly one.
  *   AUTH_OAUTH_CLIENTS      JSON: pre-registered clients [{ client_id, client_name, redirect_uris, jwks? }]
- *   AUTH_OAUTH_ORIGIN       the issuer's origin when it is not AUTH_ISSUER / APP_PUBLIC_URL
  *   ORG_SERVICE_URL         org-service's own address, for the person's memberships on the consent page
  *   AUTH_OAUTH_EXCHANGERS   services that may exchange an MCP access token (default `mcp`)
  */
@@ -18,8 +17,15 @@ export type Scope = (typeof SCOPES)[number]
 
 export const ACCESS_TOKEN_SECONDS = 300
 
+/**
+ * The issuer: exactly the `iss` of every token this realm mints (`AUTH_ISSUER`, else
+ * `APP_PUBLIC_URL`; see lib/realm.ts). It may carry a path (`https://host/v1/auth`): then
+ * its RFC 8414 metadata is at `https://host/.well-known/oauth-authorization-server/v1/auth`
+ * (path insertion), which the gateway maps to this service's own
+ * `/.well-known/oauth-authorization-server` under its API mount.
+ */
 export function issuerUrl(env: NodeJS.ProcessEnv = process.env): string {
-  return (env['AUTH_OAUTH_ORIGIN'] ?? env['AUTH_ISSUER'] ?? env['APP_PUBLIC_URL'] ?? '').trim().replace(/\/+$/, '')
+  return (env['AUTH_ISSUER'] ?? env['APP_PUBLIC_URL'] ?? '').trim().replace(/\/+$/, '')
 }
 
 export function knownResources(env: NodeJS.ProcessEnv = process.env): string[] {
@@ -43,15 +49,15 @@ export function staticClients(env: NodeJS.ProcessEnv = process.env): StaticClien
 export const exchangers = (env: NodeJS.ProcessEnv = process.env): string[] =>
   (env['AUTH_OAUTH_EXCHANGERS'] ?? 'mcp').split(',').map((s) => s.trim()).filter(Boolean)
 
-/** The endpoints, as a client outside reaches them: at the issuer's root (the gateway must route them). */
+/** The endpoints as a client outside reaches them: absolute URLs under this service's published API prefix. */
 export function endpoints(env: NodeJS.ProcessEnv = process.env) {
-  const issuer = issuerUrl(env)
+  const api = publicUrls(env as Record<string, string | undefined>).api
   return {
-    issuer,
-    authorization_endpoint: `${issuer}/authorize`,
-    token_endpoint: `${issuer}/token`,
-    registration_endpoint: `${issuer}/register`,
-    revocation_endpoint: `${issuer}/revoke`,
-    jwks_uri: publicUrls(env as Record<string, string | undefined>).api('/.well-known/jwks.json'),
+    issuer: issuerUrl(env),
+    authorization_endpoint: api('/authorize'),
+    token_endpoint: api('/token'),
+    registration_endpoint: api('/register'),
+    revocation_endpoint: api('/revoke'),
+    jwks_uri: api('/.well-known/jwks.json'),
   }
 }

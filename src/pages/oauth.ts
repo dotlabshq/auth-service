@@ -44,7 +44,7 @@ export function consentPage(v: ConsentView): string {
     <p>${t('oauthRedirect', { host: v.redirect_host })}</p>
     ${v.localhost_only ? `<p class="error" role="alert">${t('oauthLocalhost')}</p>` : ''}
     <p class="quiet">${t('oauthResource', { resource: v.resource })}</p>
-    <form class="stack" method="POST" action="${e(publicUrls().origin + '/authorize')}">
+    <form class="stack" method="POST" action="${e(publicUrls().api('/authorize'))}">
       <input type="hidden" name="req" value="${e(v.req)}">
       ${orgs}
       <fieldset>

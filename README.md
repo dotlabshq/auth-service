@@ -479,7 +479,7 @@ auth-service is an **OAuth 2.1 authorization server** for MCP clients (workspace
 specification 2026-07-28): Claude Code, Claude Desktop and claude.ai first. A consent becomes an **agent in
 iam** (`agent:<client>@<handle>`) with a rotating refresh token; the person sees and ends it on the Agents tab.
 
-| Where (the issuer's **root**) | What |
+| Where (this service's API mount, published at `/v1/auth`) | What |
 |---|---|
 | `GET /.well-known/oauth-authorization-server` | RFC 8414 metadata: `S256`, `client_id_metadata_document_supported`, `authorization_response_iss_parameter_supported`, `none` and `private_key_jwt`, `registration_endpoint`, scopes `read`, `write`, `offline_access` |
 | `GET /authorize` | checks the client and the exact redirect URI (a loopback `localhost`/`127.0.0.1`/`[::1]` registration ignores the port), PKCE `S256` required, `resource` must be a known MCP server; signs the person in if needed; the **consent page** (client name, where they are sent, localhost warning, organization from their memberships, read or read+write, "acts as `agent:…`"); skips it when an identical grant exists; redirects with `code`, `state`, `iss` |
@@ -487,20 +487,37 @@ iam** (`agent:<client>@<handle>`) with a rotating refresh token; the person sees
 | `POST /register` | Dynamic Client Registration (RFC 7591): public clients, `https` or loopback `http` redirects, rate limited, kept by iam |
 | `POST /revoke` | RFC 7009; always 200 |
 
-These are at the root because that is where a client looks (RFC 8414): the gateway must route them here (broker
-0.8.20; an older one let `/auth` swallow `/authorize`). Everything else keeps its mounts.
+**The issuer has a path** (`AUTH_ISSUER=https://host/v1/auth`, the `iss` of every token). The metadata's `issuer` is exactly
+that, and the endpoints are absolute URLs under it. A client finds the document by RFC 8414 *path insertion*, at the web
+host root: `https://host/.well-known/oauth-authorization-server/v1/auth`. This service serves it on its own mount
+(`/api/.well-known/oauth-authorization-server`); the gateway must map the first to the second. Local Caddyfile (the
+operator's, root checkout):
+
+```
+	handle /.well-known/oauth-authorization-server/v1/auth {
+		rewrite * /api/.well-known/oauth-authorization-server
+		reverse_proxy localhost:3003
+	}
+```
+
+On Flect, an `expose` entry for `/.well-known/oauth-authorization-server/v1/auth` on the web host, to this service's
+`/api/.well-known/oauth-authorization-server`. With `AUTH_ISSUER` a bare origin the document is at
+`/.well-known/oauth-authorization-server` instead, and `/authorize`, `/token`, `/register`, `/revoke` still sit under
+`/v1/auth`.
 
 - **Clients**: a Client ID Metadata Document (`client_id` is an HTTPS URL, fetched through an **SSRF guard**: https
   only, no redirects, the address is checked at connect time against private/loopback/link-local/metadata ranges,
   5 s and 64 KB limits, cached by `Cache-Control` for at most an hour; the document's `client_id` must equal the URL
   and it names redirect URIs, never a secret); a registered client (`bwc_…`); a pre-registered one
   (`AUTH_OAUTH_CLIENTS`, JSON).
-- **Resources**: `AUTH_MCP_RESOURCES` (comma-separated MCP URLs; a manifest lookup replaces it later). A client that
-  omits `resource` gets the single URL when there is exactly one.
+- **Resources**: `AUTH_MCP_RESOURCES` (comma-separated MCP URLs: the realm's own and each product's; a manifest lookup replaces
+  it later). **Each resource gets its own `aud`**, and a refresh token stays with the one it was made for. A client that
+  omits `resource` gets the single URL when there is exactly one; with several it must say.
 - **Access token**: a realm JWT (ES256 only), `type: assistant`, `kind: agent`, `via: oauth`, `actor`,
   `on_behalf_of`, `org_id`, `access`, `credential_id` (the grant), `client_id`, **`aud` = the MCP resource**, five
   minutes. It is not a realm token: a realm service rejects it. The MCP server exchanges it (`/token`, RFC 8693,
-  authenticated with its own service token, `AUTH_OAUTH_EXCHANGERS`, default `mcp`) for a realm-audience token for the
+  authenticated with its own service token, `AUTH_OAUTH_EXCHANGERS`, default `mcp`; it says which server it is with
+  `resource`, and a token made for another server is `invalid_grant`) for a realm-audience token for the
   same agent, never longer than the one it came from. Revocation takes effect at the next refresh or exchange: at most
   five minutes.
 - **Refresh**: `bwr_…`, held by iam (hashed), rotated each use; reuse revokes the chain; 30 days idle, 90 absolute. It

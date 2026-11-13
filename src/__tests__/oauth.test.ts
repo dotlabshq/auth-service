@@ -24,7 +24,9 @@ import { InMemoryKv } from './setup.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const FB_SECRET = 'auth-oauth-foldbase-secret-generated!'
-const ISSUER = 'http://auth.test'
+const ORIGIN = 'http://auth.test'
+/** The issuer carries the path it is published at, as behind the gateway (`https://host/v1/auth`). */
+const ISSUER = `${ORIGIN}/api`
 const AUDIENCE = 'oauth-realm'
 const MCP = 'https://mcp.example.test/mcp'
 const saved = { ...process.env }
@@ -49,8 +51,8 @@ beforeAll(async () => {
   fbStop = es.stop
   const fb = new FoldBase({ baseUrl: es.base, token: signJwt({ sub: 'oauth-test', type: 'service' }, FB_SECRET), tenant: `t-${randomBytes(4).toString('hex')}` })
   Object.assign(process.env, {
-    AUTH_SIGNING_KEY: Buffer.from(pem).toString('base64'), AUTH_ISSUER: ISSUER, AUTH_AUDIENCE: AUDIENCE, APP_PUBLIC_URL: ISSUER,
-    AUTH_JWKS_URI: `${ISSUER}/api/.well-known/jwks.json`, AUTH_URL: `${ISSUER}/api`, IAM_SERVICE_URL: 'http://iam.test',
+    AUTH_SIGNING_KEY: Buffer.from(pem).toString('base64'), AUTH_ISSUER: ISSUER, AUTH_AUDIENCE: AUDIENCE, APP_PUBLIC_URL: ORIGIN,
+    AUTH_JWKS_URI: `${ISSUER}/.well-known/jwks.json`, AUTH_URL: ISSUER, IAM_SERVICE_URL: 'http://iam.test',
     AUTH_API_PATH: '/api', AUTH_UI_PATH: '/ui',
   })
   delete process.env['JWT_SECRET']
@@ -141,16 +143,28 @@ describe('discovery (RFC 8414)', () => {
     expect(res.status).toBe(200)
     expect(await json(res)).toEqual({
       issuer: ISSUER, authorization_endpoint: `${ISSUER}/authorize`, token_endpoint: `${ISSUER}/token`, registration_endpoint: `${ISSUER}/register`, revocation_endpoint: `${ISSUER}/revoke`,
-      jwks_uri: `${ISSUER}/api/.well-known/jwks.json`, scopes_supported: ['read', 'write', 'offline_access'], response_types_supported: ['code'], response_modes_supported: ['query'],
+      jwks_uri: `${ISSUER}/.well-known/jwks.json`, scopes_supported: ['read', 'write', 'offline_access'], response_types_supported: ['code'], response_modes_supported: ['query'],
       grant_types_supported: ['authorization_code', 'refresh_token', 'urn:ietf:params:oauth:grant-type:token-exchange'], code_challenge_methods_supported: ['S256'],
       token_endpoint_auth_methods_supported: ['none', 'private_key_jwt'], token_endpoint_auth_signing_alg_values_supported: ['ES256'], revocation_endpoint_auth_methods_supported: ['none'],
       client_id_metadata_document_supported: true, authorization_response_iss_parameter_supported: true,
     })
   })
 
-  it('is the issuer\'s root, not /api or /ui, and the realm still publishes its keys where it did', async () => {
-    expect((await get('/api/.well-known/oauth-authorization-server')).status).toBeGreaterThanOrEqual(400)
-    expect((await get('/api/.well-known/jwks.json')).status).toBe(200)
+  it('is on the API mount (the gateway maps /.well-known/oauth-authorization-server/<issuer path> to it), nowhere else, and the metadata issuer is exactly the iss of the tokens', async () => {
+    const meta = await (await get('/.well-known/oauth-authorization-server')).json() as Record<string, any>
+    expect(meta['issuer']).toBe(ISSUER)
+    expect((await authApp.fetch(new Request(`${ORIGIN}/.well-known/oauth-authorization-server`))).status).toBeGreaterThanOrEqual(400)
+    expect((await authApp.fetch(new Request(`${ORIGIN}/ui/.well-known/oauth-authorization-server`))).status).toBeGreaterThanOrEqual(400)
+    expect((await get('/.well-known/jwks.json')).status).toBe(200)
+    const t = await tokens(await person('ada'))
+    expect(claims(t['access_token'])['iss']).toBe(meta['issuer'])
+    for (const k of ['authorization_endpoint', 'token_endpoint', 'registration_endpoint', 'revocation_endpoint']) expect(meta[k].startsWith(`${ISSUER}/`)).toBe(true)
+  })
+
+  it('the consent form posts to the published authorize endpoint', async () => {
+    const who = await person('ada')
+    cimd()
+    expect(await (await get(authorizeUrl().url, who.cookie)).text()).toContain(`action="${ISSUER}/authorize"`)
   })
 })
 
@@ -726,3 +740,59 @@ describe('the audit lines', () => {
     expect(out).not.toMatch(/bwr_[A-Za-z0-9_-]{8,}/)
   })
 })
+
+describe('more than one MCP server (a product runs its own)', () => {
+  const OTHER = 'https://quillpath.example.test/v1/mcp'
+  const EX = 'urn:ietf:params:oauth:grant-type:token-exchange'
+  const exchange = async (subject: string, resource?: string) =>
+    authApp.fetch(new Request(`${ISSUER}/token`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded', authorization: `Bearer ${await serviceToken('mcp')}` },
+      body: new URLSearchParams({ grant_type: EX, subject_token: subject, subject_token_type: 'urn:ietf:params:oauth:token-type:access_token', ...(resource ? { resource } : {}) }).toString(),
+    }))
+
+  it('each resource gets its own audience, and the refresh token stays with the one it was made for', async () => {
+    process.env['AUTH_MCP_RESOURCES'] = `${MCP}, ${OTHER}/`
+    const who = await person('ada')
+    const a = await tokens(who, { resource: MCP })
+    const b = await tokens(who, { resource: OTHER, scope: 'read', client_id: CIMD }, { decision: 'approve', access: 'read' })
+    expect(claims(a['access_token'])['aud']).toBe(MCP)
+    expect(claims(b['access_token'])['aud']).toBe(OTHER)
+    const r = await form('/token', { grant_type: 'refresh_token', client_id: CIMD, refresh_token: b['refresh_token'] })
+    expect(claims((await json(r))['access_token'])['aud']).toBe(OTHER)
+    const wrong = await form('/token', { grant_type: 'refresh_token', client_id: CIMD, refresh_token: a['refresh_token'], resource: OTHER })
+    expect((await json(wrong))['error']).toBe('invalid_target')
+  })
+
+  it('a resource must be asked for when there are several', async () => {
+    process.env['AUTH_MCP_RESOURCES'] = `${MCP},${OTHER}`
+    cimd()
+    const res = await get(authorizeUrl({ resource: undefined }).url, (await person('ada')).cookie)
+    expect(loc(res).searchParams.get('error')).toBe('invalid_target')
+  })
+
+  it('the exchange refuses a token made for the other server: it says which it is, and the audience must match', async () => {
+    process.env['AUTH_MCP_RESOURCES'] = `${MCP},${OTHER}`
+    const who = await person('ada')
+    const forA = await tokens(who, { resource: MCP })
+    const ok = await exchange(forA['access_token'], MCP)
+    expect(ok.status).toBe(200)
+    expect(claims((await json(ok))['access_token'])['aud']).toBe(AUDIENCE)
+    const crossed = await exchange(forA['access_token'], OTHER)
+    expect(crossed.status).toBe(400)
+    expect((await json(crossed))['error']).toBe('invalid_grant')
+    const forB = await tokens(who, { resource: OTHER, scope: 'read' }, { decision: 'approve', access: 'read' })
+    expect((await exchange(forB['access_token'], MCP)).status).toBe(400)
+    expect((await exchange(forB['access_token'], OTHER)).status).toBe(200)
+  })
+
+  it('and says so when it is not told, or told something unknown', async () => {
+    process.env['AUTH_MCP_RESOURCES'] = `${MCP},${OTHER}`
+    const t = await tokens(await person('ada'), { resource: MCP })
+    const missing = await exchange(t['access_token'])
+    expect(missing.status).toBe(400)
+    expect((await json(missing))['error']).toBe('invalid_target')
+    expect((await exchange(t['access_token'], 'https://evil.example/mcp')).status).toBe(400)
+  })
+})
+
