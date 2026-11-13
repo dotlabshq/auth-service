@@ -32,6 +32,17 @@ export function knownResources(env: NodeJS.ProcessEnv = process.env): string[] {
   return (env['AUTH_MCP_RESOURCES'] ?? '').split(',').map((s) => s.trim().replace(/\/+$/, '')).filter(Boolean)
 }
 
+/** org-service's address as given (no trailing slash or `/api`); empty when not configured. */
+export function orgServiceUrl(env: NodeJS.ProcessEnv = process.env): string {
+  return (env['ORG_SERVICE_URL'] ?? '').trim().replace(/\/+$/, '').replace(/\/api$/, '')
+}
+
+/** Things that make OAuth work badly, said once at boot. OAuth is in use when an MCP resource is configured. */
+export function oauthWarnings(env: NodeJS.ProcessEnv = process.env): string[] {
+  if (!knownResources(env).length) return []
+  return orgServiceUrl(env) ? [] : ['OAuth is enabled (AUTH_MCP_RESOURCES is set) but ORG_SERVICE_URL is not: the consent page cannot offer organizations, and every grant will act without one. Set ORG_SERVICE_URL (on Flect: auth `calls` org).']
+}
+
 export interface StaticClient {
   client_id: string
   client_name: string

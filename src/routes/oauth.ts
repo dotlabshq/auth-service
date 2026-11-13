@@ -28,6 +28,7 @@ import { audit, envelopeOf, personEnvelope, request, type AuditFields } from '..
 import { parseSession } from '../lib/cookies.js'
 import { ACCESS_TOKEN_SECONDS, SCOPES, endpoints, exchangers, issuerUrl, knownResources } from '../lib/oauth/config.js'
 import { iamOauth, membershipsOf } from '../lib/oauth/iam.js'
+import { orgServiceUrl } from '../lib/oauth/config.js'
 import { lookupClient, type OAuthClientInfo } from '../lib/oauth/clients.js'
 import { isLoopbackRedirect, redirectAllowed, redirectMatches } from '../lib/oauth/redirect.js'
 import { mintIdentityToken } from '../lib/mint.js'
@@ -231,7 +232,7 @@ export function oauthRouter(kv: KvClient) {
     audit('oauth_authorize', { ...req, outcome: 'ok', step: 'consent_shown', client: 'ui', ...personEnvelope(user_id), client_id: client.client_id, resource, resource_sent: sent ? 'yes' : 'no', scope: scope.join(' ') })
     return respond(c, consentPage({
       view: v, client_name: client.client_name, client_host: clientHost(client), redirect_host: new URL(redirect_uri).host, remembered_org: remembered ?? null,
-      localhost_only: client.redirect_uris.every(isLoopbackRedirect), resource, orgs, may_write, actor, req: id,
+      localhost_only: client.redirect_uris.every(isLoopbackRedirect), resource, orgs, orgs_unavailable: !orgServiceUrl(), may_write, actor, req: id,
     }))
   })
 

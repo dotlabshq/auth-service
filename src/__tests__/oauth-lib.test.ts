@@ -13,6 +13,7 @@ import { join } from 'node:path'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { redirectAllowed, redirectMatches, isLoopbackRedirect } from '../lib/oauth/redirect.js'
 import { FetchRefused, fetchJsonGuarded, isBlockedAddress } from '../lib/oauth/ssrf.js'
+import { oauthWarnings, orgServiceUrl } from '../lib/oauth/config.js'
 import { lookupClient, setClientDocumentFetcher } from '../lib/oauth/clients.js'
 
 const saved = { ...process.env }
@@ -222,5 +223,24 @@ describe.skipIf(!haveOpenssl)('the response handling, against a live server', ()
   it('the default deadline is five seconds', async () => {
     const src = readFileSync(new URL('../lib/oauth/ssrf.ts', import.meta.url), 'utf8')
     expect(src).toMatch(/opts\.timeoutMs \?\? 5000/)
+  })
+})
+
+describe('oauthWarnings (said once at boot)', () => {
+  it('no warning when OAuth is not in use, or when org-service is configured', () => {
+    expect(oauthWarnings({})).toEqual([])
+    expect(oauthWarnings({ ORG_SERVICE_URL: 'http://org:3007' })).toEqual([])
+    expect(oauthWarnings({ AUTH_MCP_RESOURCES: 'https://x.test/v1/mcp', ORG_SERVICE_URL: 'http://org:3007/api' })).toEqual([])
+  })
+  it('a clear warning when an MCP resource is set but ORG_SERVICE_URL is not', () => {
+    const w = oauthWarnings({ AUTH_MCP_RESOURCES: 'https://x.test/v1/mcp' })
+    expect(w).toHaveLength(1)
+    expect(w[0]).toMatch(/ORG_SERVICE_URL/)
+    expect(w[0]).toMatch(/calls/)
+    expect(oauthWarnings({ AUTH_MCP_RESOURCES: 'https://x.test/v1/mcp', ORG_SERVICE_URL: '  ' })).toHaveLength(1)
+  })
+  it('the address is taken without a trailing slash or /api', () => {
+    expect(orgServiceUrl({ ORG_SERVICE_URL: 'http://org:3007/api/' })).toBe('http://org:3007')
+    expect(orgServiceUrl({})).toBe('')
   })
 })

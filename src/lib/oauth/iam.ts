@@ -1,4 +1,5 @@
 /** What auth-service asks iam, for OAuth (`/_/oauth/*`, iam's internal routes; see iam's README). */
+import { orgServiceUrl } from './config.js'
 import { mintIdentityToken } from '../mint.js'
 
 const serviceName = () => process.env['AUTH_SERVICE_NAME'] ?? 'auth-service'
@@ -24,7 +25,7 @@ export interface Membership { id: string; slug: string; name: string }
 
 /** The organizations a person is in, asked of org-service as that person. None when org-service is not configured or does not answer. */
 export async function membershipsOf(user_id: string): Promise<Membership[]> {
-  const base = (process.env['ORG_SERVICE_URL'] ?? '').trim().replace(/\/+$/, '').replace(/\/api$/, '')
+  const base = orgServiceUrl()
   if (!base) return []
   const token = await mintIdentityToken({ sub: user_id, type: 'human', expires_in_seconds: 60 })
   if (!token) return []

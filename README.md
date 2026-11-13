@@ -542,7 +542,7 @@ On Flect, an `expose` entry for `/.well-known/oauth-authorization-server/v1/auth
 - **Dynamic Client Registration is capped globally per hour in iam** (`IAM_OAUTH_REGISTER_PER_HOUR`): a flood of registrations
   blocks new registrations for everyone for that hour (Client ID Metadata Document clients and already registered clients are
   unaffected). The per-address limit on `/register` in this service trusts `X-Forwarded-For`, which only the gateway may set.
-- Needs `IAM_SERVICE_URL`, the realm's signing key, and optionally `ORG_SERVICE_URL` (the person's organizations).
+- Needs `IAM_SERVICE_URL`, the realm's signing key and **`ORG_SERVICE_URL`** (org-service's address; on Flect: auth `calls` org). Without it the consent page cannot list the person's organizations: it says "Organizations are not available on this server" and every grant acts without one, and at boot auth logs a warning when `AUTH_MCP_RESOURCES` is set but `ORG_SERVICE_URL` is not.
 
 ## Known gaps
 

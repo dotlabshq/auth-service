@@ -1,6 +1,6 @@
 {
   "name": "@dotlabshq/auth-service",
-  "version": "2.6.3",
+  "version": "2.6.4",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
@@ -13,7 +13,8 @@
     "keygen": "tsx src/keygen.ts"
   },
   "dependencies": {
-    "ioredis": "5.10.1"
+    "ioredis": "5.10.1",
+    "jose": "^6.2.3"
   },
   "devDependencies": {
     "@baseworks/auth": "workspace:*",

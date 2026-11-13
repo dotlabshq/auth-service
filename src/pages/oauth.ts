@@ -21,6 +21,8 @@ export interface ConsentView {
   resource: string
   /** The person's organizations; empty: none. */
   orgs: Array<{ id: string; slug: string; name: string }>
+  /** This server has no organization service configured: say so instead of "you are in none". */
+  orgs_unavailable?: boolean
   /** Whether the client asked for `write`: otherwise only read is offered. */
   may_write: boolean
   /** `agent:<name>@<handle>`. */
@@ -37,7 +39,7 @@ export function consentPage(v: ConsentView): string {
   const product = v.view.brand.name
   const orgs = v.orgs.length
     ? `<label>${t('oauthOrg')} <select name="org_id" required>${v.orgs.map((o, i) => `<option value="${e(o.id)}"${(v.remembered_org ? o.id === v.remembered_org : i === 0) ? ' selected' : ''}>${e(o.name)}</option>`).join('')}</select></label>`
-    : `<p class="quiet">${t('oauthNoOrg')}</p>`
+    : `<p class="quiet">${t(v.orgs_unavailable ? 'oauthOrgsUnavailable' : 'oauthNoOrg')}</p>`
   return layout({
     title: t('oauthTitle', { client: v.client_name }),
     view: v.view,

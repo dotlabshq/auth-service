@@ -6,6 +6,7 @@ import type { KvClient } from './db/client.js'
 import { devBanner, devLogin } from './lib/dev.js'
 import { publicUrls } from './lib/urls.js'
 import { createApp } from './app.js'
+import { oauthWarnings } from './lib/oauth/config.js'
 
 // Dev mode is decided once, at boot: the password is made up here and must stay
 // the same for the life of the process. Throws under NODE_ENV=production.
@@ -70,6 +71,8 @@ try {
   redis?.disconnect()
   kv = memoryKvAdapter()
 }
+
+for (const w of oauthWarnings()) console.warn(`auth-service: ${w}`)
 
 const app = createApp({ dev, kv, log: true })
 

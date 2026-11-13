@@ -291,7 +291,9 @@ describe('the consent page', () => {
     expect(html).toContain('Read only')
     expect(html).toContain('Read and write')
     expect(html).toContain('This application runs on your own computer')
-    expect(html).toContain('You are not in an organization yet')
+    // no ORG_SERVICE_URL in this environment: the page says organizations are not available, not that the person has none
+    expect(html).toContain('Organizations are not available on this server')
+    expect(html).not.toContain('You are not in an organization yet')
     expect(html).toMatch(/name="decision" value="approve"/)
     expect(html).toMatch(/name="decision" value="deny"/)
     expect(html).not.toMatch(/<script/i)
