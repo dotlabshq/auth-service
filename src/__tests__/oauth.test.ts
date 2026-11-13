@@ -465,6 +465,16 @@ describe('/token: authorization_code', () => {
     expect(agents.agents).toEqual([expect.objectContaining({ client_id: CIMD, client_name: 'Claude Code', actor: `agent:claude-code@${who.handle}`, id: claims(t['access_token'])['sub'] })])
   })
 
+  it('the consent page preselects read, also when the client asks for write: write is the person\'s own choice', async () => {
+    const who = await person('ada')
+    for (const scope of ['read', 'read write', 'write']) {
+      const c = await consent(who, { scope })
+      expect(c.html, scope).toMatch(/value="read" checked/)
+      if (scope !== 'read') expect(c.html, scope).toMatch(/value="write">/)
+      expect(c.html, scope).not.toMatch(/value="write" checked/)
+    }
+  })
+
   it('a PKCE verifier may use every unreserved character (RFC 7636), `.` and `~` too, as the MCP SDK makes them', async () => {
     const who = await person('ada')
     const verifier = 'abcDEF0123456789-._~abcDEF0123456789-._~abcDEF01234'

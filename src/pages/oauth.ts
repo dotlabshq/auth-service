@@ -52,8 +52,8 @@ export function consentPage(v: ConsentView): string {
       ${orgs}
       <fieldset>
         <legend>${t('oauthAccess')}</legend>
-        <label><input type="radio" name="access" value="read"${v.may_write ? '' : ' checked'}> ${t('oauthRead')}</label>
-        ${v.may_write ? `<label><input type="radio" name="access" value="write" checked> ${t('oauthWrite')}</label>` : ''}
+        <label><input type="radio" name="access" value="read" checked> ${t('oauthRead')}</label>
+        ${v.may_write ? `<label><input type="radio" name="access" value="write"> ${t('oauthWrite')}</label>` : ''}
       </fieldset>
       <p>${t('oauthActs', { actor: v.actor })}</p>
       <button class="btn primary" type="submit" name="decision" value="approve">${t('oauthApprove')}</button>
