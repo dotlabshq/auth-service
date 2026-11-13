@@ -465,6 +465,18 @@ describe('/token: authorization_code', () => {
     expect(agents.agents).toEqual([expect.objectContaining({ client_id: CIMD, client_name: 'Claude Code', actor: `agent:claude-code@${who.handle}`, id: claims(t['access_token'])['sub'] })])
   })
 
+  it('a PKCE verifier may use every unreserved character (RFC 7636), `.` and `~` too, as the MCP SDK makes them', async () => {
+    const who = await person('ada')
+    const verifier = 'abcDEF0123456789-._~abcDEF0123456789-._~abcDEF01234'
+    const challenge = createHash('sha256').update(verifier).digest('base64url')
+    const c = await consent(who, { code_challenge: challenge })
+    const ok = await form('/token', { grant_type: 'authorization_code', client_id: CIMD, code: c.code!, code_verifier: verifier, redirect_uri: REDIRECT })
+    expect(ok.status).toBe(200)
+    const c2 = await consent(await person('burner2'), { code_challenge: challenge }, { decision: 'approve' })
+    const bad = await form('/token', { grant_type: 'authorization_code', client_id: CIMD, code: c2.code!, code_verifier: verifier + '!', redirect_uri: REDIRECT })
+    expect(bad.status).toBe(400)
+  })
+
   it('a code is single use, whoever tries again, and one wrong try burns it', async () => {
     const who = await person('ada')
     const c = await consent(who)

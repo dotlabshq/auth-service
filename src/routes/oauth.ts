@@ -39,6 +39,8 @@ import { respond, view } from '../pages/layout.js'
 const CODE_TTL = 60
 const REQ_TTL = 600
 const B64URL = /^[A-Za-z0-9_-]{43,128}$/
+/** RFC 7636 §4.1: a verifier is any of the unreserved characters, 43 to 128 of them (the MCP SDK's generator uses `.` and `~`). The challenge stays base64url. */
+const VERIFIER = /^[A-Za-z0-9._~-]{43,128}$/
 const GRANT_CODE = 'authorization_code'
 const GRANT_REFRESH = 'refresh_token'
 const GRANT_EXCHANGE = 'urn:ietf:params:oauth:grant-type:token-exchange'
@@ -342,7 +344,7 @@ export function oauthRouter(kv: KvClient) {
       if (rec.client_id !== client.client_id) return refuse(400, 'invalid_grant', 'client_mismatch', { client_id: client.client_id })
       if (str('redirect_uri') && str('redirect_uri') !== rec.redirect_uri) return refuse(400, 'invalid_grant', 'redirect_mismatch', { client_id: client.client_id })
       const verifierStr = str('code_verifier')
-      if (!B64URL.test(verifierStr) || !same(sha256b64(verifierStr), rec.code_challenge)) return refuse(400, 'invalid_grant', 'pkce_failed', { client_id: client.client_id })
+      if (!VERIFIER.test(verifierStr) || !same(sha256b64(verifierStr), rec.code_challenge)) return refuse(400, 'invalid_grant', 'pkce_failed', { client_id: client.client_id })
       if (given && given !== rec.resource) return refuse(400, 'invalid_target', 'resource_mismatch', { client_id: client.client_id })
 
       const made = await iamOauth<{ grant?: any; refresh_token?: string; error?: string }>('POST', '/grants', {
