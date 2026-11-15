@@ -26,7 +26,7 @@ import { principalOf } from '@baseworks/auth/principal'
 import { kvTake, type KvClient } from '../db/client.js'
 import { audit, envelopeOf, personEnvelope, request, type AuditFields } from '../lib/audit.js'
 import { parseSession } from '../lib/cookies.js'
-import { EXCHANGED_TOKEN_SECONDS, SCOPES, accessTokenSeconds, endpoints, exchangers, issuerUrl, knownResources } from '../lib/oauth/config.js'
+import { AGENTS_SCOPE, EXCHANGED_TOKEN_SECONDS, SCOPES, accessTokenSeconds, endpoints, exchangers, issuerUrl, knownResources, offersAgents, scopesSupported } from '../lib/oauth/config.js'
 import { iamOauth, membershipsOf } from '../lib/oauth/iam.js'
 import { orgServiceUrl } from '../lib/oauth/config.js'
 import { lookupClient, type OAuthClientInfo } from '../lib/oauth/clients.js'
@@ -46,6 +46,10 @@ const GRANT_CODE = 'authorization_code'
 const GRANT_REFRESH = 'refresh_token'
 const GRANT_EXCHANGE = 'urn:ietf:params:oauth:grant-type:token-exchange'
 const ACCESS_TOKEN_TYPE = 'urn:ietf:params:oauth:token-type:access_token'
+/** An MCP session id: visible ASCII, 1 to 64 characters (the `sid` claim). */
+const SESSION_ID = /^[\x21-\x7e]{1,64}$/
+/** A role agent's name, as iam's rule 5 has it. iam decides; this only spares it the junk. */
+const AGENT_NAME = /^[a-z][a-z0-9-]{0,31}$/
 const ASSERTION_TYPE = 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer'
 
 const sha256b64 = (s: string) => createHash('sha256').update(s).digest('base64url')
@@ -67,6 +71,19 @@ interface PendingRequest {
   resource_sent: boolean
 }
 
+/** What iam's `POST /_/oauth/grants/:id/act-as` answers (200) or refuses with. */
+interface ActAs {
+  agent?: { id: string; name: string; actor: string; state: string }
+  created?: boolean
+  connection?: { id: string; actor: string }
+  on_behalf_of?: string
+  client_id?: string
+  org_id?: string | null
+  access?: unknown
+  error?: string
+  reason?: string
+}
+
 interface CodeRecord {
   user_id: string
   client_id: string
@@ -77,6 +94,8 @@ interface CodeRecord {
   org_id: string | null
   access: Array<'read' | 'write'>
   scope: string
+  /** The grant may act as any of the person's agents (the `agents` scope was asked for and chosen). */
+  agents: boolean
 }
 
 /** A rate limit that remembers nothing durable: per key, per minute. */
@@ -116,7 +135,7 @@ export function oauthRouter(kv: KvClient) {
       registration_endpoint: e.registration_endpoint,
       revocation_endpoint: e.revocation_endpoint,
       jwks_uri: e.jwks_uri,
-      scopes_supported: [...SCOPES],
+      scopes_supported: scopesSupported(),
       response_types_supported: ['code'],
       response_modes_supported: ['query'],
       grant_types_supported: [GRANT_CODE, GRANT_REFRESH, GRANT_EXCHANGE],
@@ -142,9 +161,12 @@ export function oauthRouter(kv: KvClient) {
 
   async function issueCode(c: Context, p: PendingRequest, client: OAuthClientInfo, org_id: string | null, access: Array<'read' | 'write'>, step: string): Promise<Response> {
     const code = random(32)
+    // `agents` is granted only when it was asked for AND this resource still offers it: a form cannot add it.
+    const agents = p.scope.includes(AGENTS_SCOPE) && offersAgents(p.resource)
     const record: CodeRecord = {
       user_id: p.user_id, client_id: p.client_id, client_name: client.client_name, redirect_uri: p.redirect_uri,
-      code_challenge: p.code_challenge, resource: p.resource, org_id, access, scope: [...access, ...(p.scope.includes('offline_access') ? ['offline_access'] : [])].join(' '),
+      code_challenge: p.code_challenge, resource: p.resource, org_id, access, agents,
+      scope: [...access, ...(agents ? [AGENTS_SCOPE] : []), ...(p.scope.includes('offline_access') ? ['offline_access'] : [])].join(' '),
     }
     await kv.set(`oauth:code:${code}`, JSON.stringify(record), { ttl: CODE_TTL })
     audit('oauth_authorize', { ...request(c), outcome: 'ok', step, client: 'ui', ...personEnvelope(p.user_id), client_id: p.client_id, resource: p.resource, resource_sent: p.resource_sent ? 'yes' : 'no', scope: record.scope, ...(org_id ? { org_id } : {}) })
@@ -193,10 +215,16 @@ export function oauthRouter(kv: KvClient) {
     }
 
     const asked = (q['scope'] ?? '').split(/\s+/).filter(Boolean)
-    if (asked.some((s) => !(SCOPES as readonly string[]).includes(s))) return fail('invalid_scope', 'scopes are read, write and offline_access')
-    // No scope (Claude Code sends none) is a request for what the resource offers: read and write. The person still chooses.
-    const scope = [...asked]
-    if (!scope.includes('read') && !scope.includes('write')) scope.unshift('read', 'write')
+    if (asked.some((s) => !(SCOPES as readonly string[]).includes(s))) return fail('invalid_scope', 'scopes are read, write, offline_access and agents')
+    // No scope (Claude Code sends none) is a request for what the resource offers: read and write, and `agents` where
+    // the resource offers it. The person still chooses. `agents` asked of a resource that does not offer it is left
+    // out, not an error: the client learns what it got from the token response's `scope`.
+    const scope = asked.filter((s) => s !== AGENTS_SCOPE || offersAgents(resource))
+    if (!scope.includes('read') && !scope.includes('write')) {
+      scope.unshift('read', 'write')
+      if (offersAgents(resource) && !scope.includes(AGENTS_SCOPE)) scope.push(AGENTS_SCOPE)
+    }
+    const wants_agents = scope.includes(AGENTS_SCOPE)
 
     // 3. Who is the person. Not signed in: sign in, and come back to this exact request.
     const session = parseSession(c)
@@ -221,7 +249,8 @@ export function oauthRouter(kv: KvClient) {
     const candidates: Array<string | null> = orgs.length ? orgs.map((o) => o.id) : [null]
     const found: Array<string | null> = []
     for (const org_id of candidates.slice(0, 20)) {
-      const r = await iamOauth<{ grant: unknown }>('POST', '/grants/find', { user_id, client_id: client.client_id, resource, org_id, access })
+      // `scopes` only when `agents` is asked for: a grant with it and one without are different consents, so adding it asks again.
+      const r = await iamOauth<{ grant: unknown }>('POST', '/grants/find', { user_id, client_id: client.client_id, resource, org_id, access, ...(wants_agents ? { scopes: [...access, AGENTS_SCOPE] } : {}) })
       if (r.status === 200 && r.data.grant) found.push(org_id)
     }
     const remembered = found.length === 1 ? found[0]! : undefined
@@ -233,7 +262,7 @@ export function oauthRouter(kv: KvClient) {
     audit('oauth_authorize', { ...req, outcome: 'ok', step: 'consent_shown', client: 'ui', ...personEnvelope(user_id), client_id: client.client_id, resource, resource_sent: sent ? 'yes' : 'no', scope: scope.join(' ') })
     return respond(c, consentPage({
       view: v, client_name: client.client_name, client_host: clientHost(client), redirect_host: new URL(redirect_uri).host, remembered_org: remembered ?? null,
-      localhost_only: client.redirect_uris.every(isLoopbackRedirect), resource, orgs, orgs_unavailable: !orgServiceUrl(), may_write, actor, req: id,
+      localhost_only: client.redirect_uris.every(isLoopbackRedirect), resource, orgs, orgs_unavailable: !orgServiceUrl(), may_write, may_agents: wants_agents, actor, req: id,
     }))
   })
 
@@ -351,6 +380,7 @@ export function oauthRouter(kv: KvClient) {
 
       const made = await iamOauth<{ grant?: any; refresh_token?: string; error?: string }>('POST', '/grants', {
         user_id: rec.user_id, client_id: rec.client_id, client_name: rec.client_name, resource: rec.resource, org_id: rec.org_id, access: rec.access,
+        ...(rec.agents ? { scopes: [...rec.access, AGENTS_SCOPE] } : {}),
       })
       if (made.status === 0 || made.status >= 500) return refuse(502, 'server_error', 'iam_unavailable', { client_id: client.client_id })
       if (made.status !== 201 || !made.data.grant || !made.data.refresh_token) return refuse(400, 'invalid_grant', `grant_${made.data.error ?? made.status}`, { client_id: client.client_id })
@@ -380,7 +410,7 @@ export function oauthRouter(kv: KvClient) {
       if (!token) return oauthError(c, 500, 'server_error')
       audit('oauth_token', { ...req, outcome: 'ok', step: 'refreshed', ...agentEnvelope(g), client_id: client.client_id, resource: g.resource, resource_sent: given ? 'yes' : 'no', grant_id: g.id })
       noStore(c)
-      return c.json({ access_token: token, token_type: 'Bearer', expires_in: accessTokenSeconds(), refresh_token: out.data.refresh_token, scope: [...g.access, 'offline_access'].join(' ') })
+      return c.json({ access_token: token, token_type: 'Bearer', expires_in: accessTokenSeconds(), refresh_token: out.data.refresh_token, scope: [...g.access, ...(Array.isArray(g.scopes) && g.scopes.includes(AGENTS_SCOPE) ? [AGENTS_SCOPE] : []), 'offline_access'].join(' ') })
     }
 
     return refuse(400, 'unsupported_grant_type', 'unsupported_grant_type', { client_id: client.client_id })
@@ -411,23 +441,78 @@ export function oauthRouter(kv: KvClient) {
     if (!claims || claims['via'] !== 'oauth' || claims['kind'] !== 'agent' || typeof claims['credential_id'] !== 'string') return refuse(400, 'invalid_grant', 'subject_token_invalid')
     const remaining = Math.floor(((claims.exp ?? 0) * 1000 - Date.now()) / 1000)
     if (remaining < 1) return refuse(400, 'invalid_grant', 'subject_token_expired')
+    const grant_id = String(claims['credential_id'])
+    const client_id = typeof claims['client_id'] === 'string' ? { client_id: claims['client_id'] } : {}
+    const ttl = Math.min(EXCHANGED_TOKEN_SECONDS, remaining)
+
+    // The two optional extension parameters, checked before iam is asked anything.
+    const given = (k: string) => (form[k] === undefined ? undefined : typeof form[k] === 'string' ? (form[k] as string) : null)
+    const agentParam = given('agent'), sessionParam = given('session')
+    if (sessionParam !== undefined && (sessionParam === null || !SESSION_ID.test(sessionParam))) return refuse(400, 'invalid_request', 'session_invalid', { grant_id, ...client_id })
+    const session_id = sessionParam ?? undefined
+    if (agentParam !== undefined && (agentParam === null || !AGENT_NAME.test(agentParam))) return refuse(400, 'invalid_target', 'agent_name_invalid', { grant_id, ...client_id, ...(session_id ? { session_id } : {}) })
+    const agent = agentParam ?? undefined
+    const sidClaim = session_id ? { sid: session_id } : {}
+    const named_agent = agent ? { agent } : {}
+
     // The access token lives an hour: whether the grant is still good is asked of iam at every exchange, so a revocation
     // (or a suspended or removed agent, or a removed owner) stops tool calls within the realm token's five minutes.
-    const live = await iamOauth<{ live?: boolean; reason?: string }>('GET', `/grants/${encodeURIComponent(String(claims['credential_id']))}`)
-    if (live.status === 0 || live.status >= 500) return refuse(502, 'server_error', 'iam_unavailable', { grant_id: String(claims['credential_id']) })
-    if (live.status !== 200 || live.data.live !== true) return refuse(400, 'invalid_grant', `grant_not_live_${live.data.reason ?? 'unknown'}`, { grant_id: String(claims['credential_id']) })
-    const p = principalOf(claims)
-    const token = await mintIdentityToken({
-      sub: String(claims.sub), type: 'assistant', expires_in_seconds: Math.min(EXCHANGED_TOKEN_SECONDS, remaining),
-      claims: {
-        kind: 'agent', via: 'oauth', actor: p.actor, ...(p.on_behalf_of ? { on_behalf_of: p.on_behalf_of } : {}), credential_id: claims['credential_id'],
-        ...(p.access ? { access: p.access } : {}), ...(p.org_id ? { org_id: p.org_id } : {}), client: 'mcp', ...(typeof claims['client_id'] === 'string' ? { client_id: claims['client_id'] } : {}),
-      },
-    })
+    if (!agent) {
+      const live = await iamOauth<{ live?: boolean; reason?: string }>('GET', `/grants/${encodeURIComponent(grant_id)}`)
+      if (live.status === 0 || live.status >= 500) return refuse(502, 'server_error', 'iam_unavailable', { grant_id })
+      if (live.status !== 200 || live.data.live !== true) return refuse(400, 'invalid_grant', `grant_not_live_${live.data.reason ?? 'unknown'}`, { grant_id })
+      const p = principalOf({ ...claims, ...sidClaim })
+      const token = await mintIdentityToken({
+        sub: String(claims.sub), type: 'assistant', expires_in_seconds: ttl,
+        claims: {
+          kind: 'agent', via: 'oauth', actor: p.actor, ...(p.on_behalf_of ? { on_behalf_of: p.on_behalf_of } : {}), credential_id: claims['credential_id'],
+          ...(p.access ? { access: p.access } : {}), ...(p.org_id ? { org_id: p.org_id } : {}), client: 'mcp', ...client_id, ...sidClaim,
+        },
+      })
+      if (!token) return oauthError(c, 500, 'server_error')
+      audit('oauth_token', { ...req, outcome: 'ok', step: 'exchanged', client: 'mcp', ...envelopeOf(p, 'mcp'), ...client_id, grant_id })
+      noStore(c)
+      return c.json({ access_token: token, issued_token_type: ACCESS_TOKEN_TYPE, token_type: 'Bearer', expires_in: ttl })
+    }
+
+    // Acting as a role agent: iam does the liveness check and the rest in one call (scope, name, standing, limits).
+    // The role agent gets the person's authority and nothing more: `access` is what the grant allows, never wider.
+    const acted = await iamOauth<ActAs>('POST', `/grants/${encodeURIComponent(grant_id)}/act-as`, { name: agent })
+    const ctx = { grant_id, ...client_id, ...named_agent, ...(session_id ? { session_id } : {}) }
+    if (acted.status === 0 || acted.status >= 500) return refuse(502, 'server_error', 'iam_unavailable', ctx)
+    if (acted.status !== 200) {
+      const why = typeof acted.data.error === 'string' ? acted.data.error : ''
+      if (acted.status === 400 && why === 'grant_not_live') return refuse(400, 'invalid_grant', `grant_not_live_${acted.data.reason ?? 'unknown'}`, ctx)
+      if (acted.status === 403 && why === 'insufficient_scope') {
+        // The MCP server tells this one apart (`error` and `scope`) to send the step-up challenge naming `agents`.
+        audit('oauth_token', { ...req, outcome: 'refused', step: GRANT_EXCHANGE, reason: 'insufficient_scope', client: 'api', ...ctx })
+        noStore(c)
+        return c.json({ error: 'insufficient_scope', error_description: 'the grant does not include the agents scope', scope: AGENTS_SCOPE }, 403)
+      }
+      if (['invalid_agent_name', 'agent_inactive', 'agent_removed', 'agent_limit'].includes(why)) return refuse(400, 'invalid_target', why, ctx)
+      // Anything else (iam does not know this caller, a body it did not understand) is a fault here, not the client's.
+      return refuse(502, 'server_error', `iam_act_as_${acted.status}`, ctx)
+    }
+    const a = acted.data
+    const iam_access = Array.isArray(a.access) ? a.access.filter((x): x is 'read' | 'write' => x === 'read' || x === 'write') : null
+    // What iam says is checked against what the subject token already says: the same connection, person and organization.
+    if (!a.agent?.id || !a.agent.actor || !a.connection?.id || !a.connection.actor || typeof a.on_behalf_of !== 'string' || !iam_access) return refuse(502, 'server_error', 'iam_act_as_malformed', ctx)
+    const claimed_org = typeof claims['org_id'] === 'string' ? claims['org_id'] : null
+    if (a.connection.id !== String(claims.sub) || (typeof claims['on_behalf_of'] === 'string' && claims['on_behalf_of'] !== a.on_behalf_of) || (claimed_org ?? null) !== (a.org_id ?? null)) {
+      return refuse(400, 'invalid_grant', 'act_as_connection_mismatch', ctx)
+    }
+    const token_access = Array.isArray(claims['access']) ? (claims['access'] as unknown[]) : null
+    const access = token_access ? iam_access.filter((x) => token_access.includes(x)) : iam_access
+    const role_claims = {
+      kind: 'agent', via: 'oauth', actor: a.agent.actor, on_behalf_of: a.on_behalf_of, credential_id: grant_id,
+      act: { sub: a.connection.id, actor: a.connection.actor }, access, ...(a.org_id ? { org_id: a.org_id } : {}),
+      client: 'mcp', ...(a.client_id ? { client_id: a.client_id } : client_id), ...sidClaim,
+    }
+    const token = await mintIdentityToken({ sub: a.agent.id, type: 'assistant', expires_in_seconds: ttl, claims: role_claims })
     if (!token) return oauthError(c, 500, 'server_error')
-    audit('oauth_token', { ...req, outcome: 'ok', step: 'exchanged', client: 'mcp', ...envelopeOf(p, 'mcp'), ...(typeof claims['client_id'] === 'string' ? { client_id: claims['client_id'] } : {}), grant_id: String(claims['credential_id']) })
+    audit('oauth_token', { ...req, outcome: 'ok', step: 'exchanged', client: 'mcp', ...envelopeOf(principalOf({ sub: a.agent.id, type: 'assistant', ...role_claims }), 'mcp'), ...client_id, grant_id, ...named_agent })
     noStore(c)
-    return c.json({ access_token: token, issued_token_type: ACCESS_TOKEN_TYPE, token_type: 'Bearer', expires_in: Math.min(EXCHANGED_TOKEN_SECONDS, remaining) })
+    return c.json({ access_token: token, issued_token_type: ACCESS_TOKEN_TYPE, token_type: 'Bearer', expires_in: ttl })
   }
 
   // ── /register (RFC 7591) ───────────────────────────────────────────────────

@@ -481,7 +481,7 @@ iam** (`agent:<client>@<handle>`) with a rotating refresh token; the person sees
 
 | Where (this service's API mount, published at `/v1/auth`) | What |
 |---|---|
-| `GET /.well-known/oauth-authorization-server` | RFC 8414 metadata: `S256`, `client_id_metadata_document_supported`, `authorization_response_iss_parameter_supported`, `none` and `private_key_jwt`, `registration_endpoint`, scopes `read`, `write`, `offline_access` |
+| `GET /.well-known/oauth-authorization-server` | RFC 8414 metadata: `S256`, `client_id_metadata_document_supported`, `authorization_response_iss_parameter_supported`, `none` and `private_key_jwt`, `registration_endpoint`, scopes `read`, `write`, `offline_access`, and `agents` when a resource offers it |
 | `GET /authorize` | checks the client and the exact redirect URI (a loopback `localhost`/`127.0.0.1`/`[::1]` registration ignores the port), PKCE `S256` required, `resource` must be a known MCP server; signs the person in if needed; the **consent page** (client name, where they are sent, localhost warning, organization from their memberships, read or read+write, "acts as `agent:…`"); skips it when an identical grant exists; redirects with `code`, `state`, `iss` |
 | `POST /token` | form-urlencoded. `authorization_code` (`code_verifier`, `resource`); `refresh_token` (rotating; every failure is `invalid_grant`); `urn:ietf:params:oauth:grant-type:token-exchange` for the realm's MCP server |
 | `POST /register` | Dynamic Client Registration (RFC 7591): public clients, `https` or loopback `http` redirects, rate limited, kept by iam |
@@ -556,6 +556,37 @@ On Flect, an `expose` entry for `/.well-known/oauth-authorization-server/v1/auth
   blocks new registrations for everyone for that hour (Client ID Metadata Document clients and already registered clients are
   unaffected). The per-address limit on `/register` in this service trusts `X-Forwarded-For`, which only the gateway may set.
 - Needs `IAM_SERVICE_URL`, the realm's signing key and **`ORG_SERVICE_URL`** (org-service's address; on Flect: auth `calls` org). Without it the consent page cannot list the person's organizations: it says "Organizations are not available on this server" and every grant acts without one, and at boot auth logs a warning when `AUTH_MCP_RESOURCES` is set but `ORG_SERVICE_URL` is not.
+
+### Acting as a role agent, and sessions (2.7.0)
+
+One connection (Claude Code) can act as any of its person's agents (`software@basri`). Design:
+`role-agents-and-sessions-design.md` §5. Nothing changes for a connection that does not ask: no `agent`, no `session`,
+no `agents` scope is exactly 2.6.5.
+
+- **`agents` is an OAuth scope.** `scopes_supported` lists it when some resource offers it. **Which resources offer it is
+  `AUTH_MCP_AGENTS_RESOURCES`**: a comma-separated subset of `AUTH_MCP_RESOURCES` (default none, so quillpath's server is never
+  asked for it; set it for the MCP server whose tools take `as`, e.g. clave's). On such a resource a client that sends no
+  scope is asking for `read write agents`, and the consent page adds a line: "It can work as any of your agents (software,
+  platform, and new ones it names)." A client that names scopes gets `agents` only if it named it; on a resource that does not
+  offer it the scope is left out (the token response's `scope` says what was granted). The form cannot add it. The grant is
+  created in iam with `scopes`; `/grants/find` is given `scopes` when `agents` is asked for, so a person who agreed without it is
+  asked again once the client adds it (the step-up of the MCP authorization specification), and not again after. Existing grants
+  are not migrated: they keep working as themselves.
+- **Exchange, `agent=<name>`**: instead of the liveness call auth calls iam's `POST /_/oauth/grants/:id/act-as` (liveness,
+  scope, name, standing and limits in one) and mints the realm token for the role agent: `sub`, `actor` (the role agent),
+  `on_behalf_of`, `credential_id` (the grant), `act: { sub, actor }` (the connection, RFC 8693 §4.1), `access`, `org_id`,
+  `client`, `client_id`. `access` is iam's answer cut by the subject token's: **never wider than the grant**. The answer is checked
+  against the subject token (same connection, person, organization); a mismatch is `invalid_grant` and no token.
+- **Exchange, `session=<id>`**: visible ASCII, 1 to 64 characters, written as `sid`, with or without `agent`.
+- **Refusals** (nothing minted, nothing created): iam `grant_not_live` → `invalid_grant` (`grant_not_live_<reason>`);
+  `invalid_agent_name`, `agent_inactive`, `agent_removed`, `agent_limit` → `invalid_target` (the audit `reason` is iam's code); a
+  name that does not match `^[a-z][a-z0-9-]{0,31}$` is `invalid_target` (`agent_name_invalid`) without asking iam; a bad
+  `session` is `invalid_request` (`session_invalid`); **`insufficient_scope` → 403 `{ error: "insufficient_scope", scope:
+  "agents" }`**, the one refusal an MCP server tells apart, to send its client the step-up challenge naming `agents`; iam not
+  answering or answering what it should not is a 502.
+- **Audit**: an `oauth_token` line `exchanged` adds `agent` (the name asked for), `act` (the connection's actor) and
+  `session_id`; `actor` is the role agent. Refusals carry `agent`, `session_id` when valid, and `grant_id`.
+- Needs iam 0.11.0 for `agent=` and for the `agents` scope; without `agent`, iam 0.10.1 is enough.
 
 ## Known gaps
 

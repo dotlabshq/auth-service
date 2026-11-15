@@ -8,12 +8,18 @@
  *   AUTH_OAUTH_CLIENTS      JSON: pre-registered clients [{ client_id, client_name, redirect_uris, jwks? }]
  *   ORG_SERVICE_URL         org-service's own address, for the person's memberships on the consent page
  *   AUTH_OAUTH_EXCHANGERS   services that may exchange an MCP access token (default `mcp`)
+ *   AUTH_MCP_AGENTS_RESOURCES  the subset of AUTH_MCP_RESOURCES whose server lets a client act as another of the
+ *                           person's agents (`agent=` on the exchange, the `agents` scope). Default: none, so a
+ *                           product whose tools never use it (quillpath) is never asked for it.
  */
 import type { JSONWebKeySet } from 'jose'
 import { publicUrls } from '../urls.js'
 
-export const SCOPES = ['read', 'write', 'offline_access'] as const
+export const SCOPES = ['read', 'write', 'offline_access', 'agents'] as const
 export type Scope = (typeof SCOPES)[number]
+
+/** `agents`: the grant may act as any of its person's agents (design: role agents). Offered only by the resources named below. */
+export const AGENTS_SCOPE = 'agents'
 
 /**
  * How long the access token for the MCP server lives (`AUTH_OAUTH_ACCESS_SECONDS`, default 60 minutes). Long, because
@@ -41,6 +47,19 @@ export function issuerUrl(env: NodeJS.ProcessEnv = process.env): string {
 
 export function knownResources(env: NodeJS.ProcessEnv = process.env): string[] {
   return (env['AUTH_MCP_RESOURCES'] ?? '').split(',').map((s) => s.trim().replace(/\/+$/, '')).filter(Boolean)
+}
+
+/** The known MCP servers that offer the `agents` scope (`AUTH_MCP_AGENTS_RESOURCES`, each also in `AUTH_MCP_RESOURCES`). */
+export function agentsResources(env: NodeJS.ProcessEnv = process.env): string[] {
+  const known = knownResources(env)
+  return (env['AUTH_MCP_AGENTS_RESOURCES'] ?? '').split(',').map((s) => s.trim().replace(/\/+$/, '')).filter((r) => r && known.includes(r))
+}
+
+export const offersAgents = (resource: string, env: NodeJS.ProcessEnv = process.env): boolean => agentsResources(env).includes(resource.replace(/\/+$/, ''))
+
+/** What the metadata says: `agents` only when some resource of this realm offers it. */
+export function scopesSupported(env: NodeJS.ProcessEnv = process.env): string[] {
+  return SCOPES.filter((s) => s !== AGENTS_SCOPE || agentsResources(env).length > 0)
 }
 
 /** org-service's address as given (no trailing slash or `/api`); empty when not configured. */

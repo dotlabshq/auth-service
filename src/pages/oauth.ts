@@ -25,6 +25,8 @@ export interface ConsentView {
   orgs_unavailable?: boolean
   /** Whether the client asked for `write`: otherwise only read is offered. */
   may_write: boolean
+  /** Whether the grant will include the `agents` scope: it may work as any of the person's agents. */
+  may_agents?: boolean
   /** `agent:<name>@<handle>`. */
   actor: string
   /** The organization chosen last time, selected again. */
@@ -58,6 +60,7 @@ export function consentPage(v: ConsentView): string {
         ${v.may_write ? `<label><input type="radio" name="access" value="write" checked> ${t('oauthWrite')}</label>` : ''}
       </fieldset>
       <p>${t('oauthActs', { actor: v.actor })}</p>
+      ${v.may_agents ? `<p>${t('oauthAgents')}</p>` : ''}
       <button class="btn primary" type="submit" name="decision" value="approve">${t('oauthApprove')}</button>
       <button class="btn" type="submit" name="decision" value="deny">${t('oauthDeny')}</button>
     </form>`,

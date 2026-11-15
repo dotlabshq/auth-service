@@ -261,6 +261,51 @@ paths:
         "302": { description: "`state` was given: redirect to the approval page" }
         "401": { description: No session }
         "500": { description: The realm has no way to sign }
+    post:
+      tags: [oauth]
+      summary: The OAuth token endpoint (authorization code, refresh, and the MCP server's token exchange)
+      description: |
+        `application/x-www-form-urlencoded`. `grant_type` is `authorization_code`, `refresh_token`, or
+        `urn:ietf:params:oauth:grant-type:token-exchange` (RFC 8693), the last only for a realm service listed in
+        `AUTH_OAUTH_EXCHANGERS` that presents its own service token.
+
+        **Token exchange** turns an MCP access token (audience: the MCP server) into a realm token of at most five
+        minutes. Two optional extension parameters (2.7.0):
+
+        - `agent=<name>`: act as that agent of the connection's own person (`^[a-z][a-z0-9-]{0,31}$`; created on first
+          use by iam). The realm token is then the role agent's: `sub` and `actor` are the role agent, `act` is
+          `{ sub, actor }` of the connection (RFC 8693 §4.1), `on_behalf_of`, `credential_id`, `access`, `org_id`,
+          `client`, `client_id` as without it. `access` is never wider than the grant's. Needs the `agents` scope on the
+          grant. Without `agent` nothing changes.
+        - `session=<id>`: the MCP session, visible ASCII, 1 to 64 characters; written to the realm token as `sid`.
+
+        Refusals: `invalid_grant` (the grant is not live: revoked, expired, its agent suspended or removed, or the
+        iam answer does not match the token); `invalid_target` (the agent name, or the role agent is suspended, removed
+        or over the per-person limit); `invalid_request` (`session`); **403 `insufficient_scope` with `scope: "agents"`**
+        (the grant lacks the scope: the MCP server answers its client with the step-up challenge); 502 `server_error`
+        (iam not answering). A refusal mints nothing and creates nothing.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [grant_type]
+              properties:
+                grant_type: { type: string }
+                subject_token: { type: string, description: Token exchange; the MCP access token }
+                subject_token_type: { type: string, enum: ["urn:ietf:params:oauth:token-type:access_token"] }
+                resource: { type: string, description: The MCP server the subject token was made for }
+                agent: { type: string, pattern: "^[a-z][a-z0-9-]{0,31}$", description: Token exchange; act as this agent of the same person }
+                session: { type: string, pattern: "^[\\x21-\\x7e]{1,64}$", description: Token exchange; the MCP session id, becomes the sid claim }
+      responses:
+        "200":
+          description: A token response; for an exchange, `access_token`, `issued_token_type`, `token_type`, `expires_in`
+        "400": { description: "`invalid_request`, `invalid_grant`, `invalid_target`, `unsupported_grant_type`" }
+        "401": { description: "`invalid_client`: the caller is not an exchanger, or the client could not be authenticated" }
+        "403": { description: "`insufficient_scope`, `scope: agents`: acting as an agent needs the `agents` scope" }
+        "502": { description: iam did not answer }
 
   /start:
     get:

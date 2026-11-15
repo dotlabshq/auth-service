@@ -57,6 +57,7 @@ never draws a page. A route that would do both is two routes.
   `type: 'service'` token may skip. The operator will decide those separately
   (workspace ADR 0003 §5).
 - `/exchange-key` (2.3.0): an API token (`bwt_…`) for a realm token of at most five minutes, after iam says it is live (`src/lib/iam.ts` `iamVerify`). Nothing is minted without iam's yes; every dead token is one answer, `invalid_token`; a revoked token works until the realm token ends. The claim set is fixed: add nothing from iam's answer to it.
+- Role agents (2.7.0): `agent=` and `session=` on the OAuth token exchange, `act` and `sid` in the realm token, and the `agents` scope (`AUTH_MCP_AGENTS_RESOURCES`). The claim set above stays fixed for every other token; an exchange that names no agent is byte-for-byte what it was. See README "Acting as a role agent".
 - Still to come, in 3.0: remove the deprecated navigations under `/api`.
 
 ## The rules

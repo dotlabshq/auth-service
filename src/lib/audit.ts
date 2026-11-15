@@ -40,6 +40,12 @@ export interface AuditFields {
   on_behalf_of?: string
   via?: string
   credential_id?: string
+  /** Acting as a role agent: the connection's own actor (`agent:claude-code@basri`); `actor` is the role agent. */
+  act?: string
+  /** The MCP session (a client window) the exchange was made for. */
+  session_id?: string
+  /** The role agent's name the exchange asked for (`software`), when it asked for one. */
+  agent?: string
   client?: string
   org_id?: string
   /** The email as the provider returned it, on a refused sign-in only. */
@@ -66,7 +72,7 @@ export interface AuditFields {
 /** The only keys a line may have, in the order they are written. */
 const KEYS = [
   'outcome', 'reason', 'request_id', 'ip', 'user_agent',
-  'kind', 'actor', 'actor_id', 'on_behalf_of', 'via', 'credential_id', 'client', 'org_id',
+  'kind', 'actor', 'actor_id', 'on_behalf_of', 'via', 'credential_id', 'act', 'session_id', 'agent', 'client', 'org_id',
   'email', 'client_id', 'degraded', 'step', 'resource', 'resource_sent', 'grant_id', 'scope', 'field', 'redirect_hosts',
 ] as const
 
