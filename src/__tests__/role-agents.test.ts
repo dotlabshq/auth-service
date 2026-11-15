@@ -241,7 +241,7 @@ describe('consent and the agents scope', () => {
 })
 
 describe('/token exchange: agent and session', () => {
-  async function connection(who: Person, over: Record<string, string | undefined> = {}, answer?: Record<string, string>) {
+  async function connection(who: Person, over: Record<string, string | undefined> = {}, answer?: Record<string, string>): Promise<Record<string, any> & { c: Record<string, any> }> {
     const t = await tokens(who, over, answer)
     return { ...t, c: claims(t['access_token']) }
   }
