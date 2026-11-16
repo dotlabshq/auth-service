@@ -610,7 +610,15 @@ Now the connection is only a **credential**; every call works as a named agent o
   person picks another default on the Agents tab.
 - **Exchange with `agent`**: as 2.7.0 (needs the `agents` scope); `act` present.
 - The MCP **access token** is still the connection's own (it is the credential); only the realm token names the working agent.
-- Needs iam 0.12.0.
+- **2.8.1, a choice that cannot work is never sent on to a code.** The suggestion (iam's `suggest-default`, else the client's name) is
+  checked with iam (`POST /_/oauth/agents/check`, nothing written): one that was removed, is suspended or is over the limit is not offered,
+  the field is empty and the page says why. The POST checks the chosen name the same way before a code is issued; if it cannot work, or
+  is not one of the person's agents, the consent page is shown again with the reason in words (400) and the request kept; if iam does not
+  answer the check, the page says "Try again" (503) and nothing is issued. **Remembered consent** (https callback) now applies only to a person
+  with at most one organization, and only when the grant's default agent is active; with several organizations the page is always shown, with the
+  organization chosen last (the grant that expires last) and the default agent preselected, so a person who reconnects can pick another
+  organization. Loopback rules unchanged.
+- Needs iam 0.12.0 (0.12.3 for the checks).
 
 ## Known gaps
 

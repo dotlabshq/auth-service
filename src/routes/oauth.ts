@@ -27,14 +27,14 @@ import { kvTake, type KvClient } from '../db/client.js'
 import { audit, envelopeOf, personEnvelope, request, type AuditFields } from '../lib/audit.js'
 import { parseSession } from '../lib/cookies.js'
 import { AGENTS_SCOPE, EXCHANGED_TOKEN_SECONDS, SCOPES, accessTokenSeconds, endpoints, exchangers, issuerUrl, knownResources, offersAgents, scopesSupported } from '../lib/oauth/config.js'
-import { AGENT_NAME, agentsOf, iamOauth, membershipsOf, slugOfName } from '../lib/oauth/iam.js'
+import { AGENT_NAME, agentsOf, checkAgent, iamOauth, membershipsOf, slugOfName, type AgentCheck } from '../lib/oauth/iam.js'
 import { orgServiceUrl } from '../lib/oauth/config.js'
 import { lookupClient, type OAuthClientInfo } from '../lib/oauth/clients.js'
 import { isLoopbackRedirect, redirectAllowed, redirectMatches } from '../lib/oauth/redirect.js'
 import { mintIdentityToken } from '../lib/mint.js'
 import { realm } from '../lib/realm.js'
 import { publicUrls } from '../lib/urls.js'
-import { consentPage, oauthProblemPage } from '../pages/oauth.js'
+import { consentPage, oauthProblemPage, type ConsentView } from '../pages/oauth.js'
 import { respond, view } from '../pages/layout.js'
 
 const CODE_TTL = 60
@@ -173,6 +173,37 @@ export function oauthRouter(kv: KvClient) {
     return c.redirect(back(p.redirect_uri, p.state, { code }))
   }
 
+  type Notice = NonNullable<ConsentView['agent_notice']>
+  const noticeOf = (check: Extract<AgentCheck, { ok: false }>, name: string): Notice =>
+    ({ kind: ({ agent_removed: 'removed', agent_inactive: 'suspended', agent_limit: 'limit', invalid_agent_name: 'invalid' } as const)[check.reason], name })
+
+  /**
+   * The consent page, for this pending request. The suggestion for what the connection works as (iam's last used, else the
+   * client's name) is checked with iam: one that cannot work (removed, suspended, over the limit) is not offered, and the page says why,
+   * so a person is never sent on to a code that `/token` would refuse.
+   */
+  async function showConsent(c: Context, v: ReturnType<typeof view>, o: {
+    user_id: string; client: OAuthClientInfo; p: PendingRequest; id: string; actor: string; orgs: Awaited<ReturnType<typeof membershipsOf>>
+    remembered_org?: string | null; notice?: Notice; suggested?: string; status?: 200 | 400 | 503
+  }): Promise<Response> {
+    const { user_id, client, p } = o
+    const may_write = p.scope.includes('write'), wants_agents = p.scope.includes(AGENTS_SCOPE)
+    const mine = await agentsOf(user_id)
+    let suggested = o.suggested, notice = o.notice
+    if (suggested === undefined) {
+      const last = await iamOauth<{ default_agent?: { name?: unknown } | null }>('GET', `/grants/suggest-default?user_id=${encodeURIComponent(user_id)}&client_id=${encodeURIComponent(client.client_id)}`)
+      const named = last.status === 200 ? last.data.default_agent?.name : undefined
+      suggested = typeof named === 'string' && AGENT_NAME.test(named) ? named : slugOfName(client.client_name) || 'assistant'
+      const check = await checkAgent(user_id, suggested, client.client_id)
+      if (check && !check.ok) { notice = noticeOf(check, suggested); suggested = '' }
+    }
+    return respond(c, consentPage({
+      view: v, client_name: client.client_name, client_host: clientHost(client), redirect_host: new URL(p.redirect_uri).host, remembered_org: o.remembered_org ?? null,
+      localhost_only: client.redirect_uris.every(isLoopbackRedirect), resource: p.resource, orgs: o.orgs, orgs_unavailable: !orgServiceUrl(), may_write, may_agents: wants_agents,
+      actor: o.actor, req: o.id, agents: mine, suggested_agent: suggested, ...(notice ? { agent_notice: notice } : {}),
+    }), o.status ?? 200)
+  }
+
   app.get('/authorize', async (c) => {
     const q = c.req.query()
     const v = view(c)
@@ -249,6 +280,7 @@ export function oauthRouter(kv: KvClient) {
     const candidates: Array<string | null> = orgs.length ? orgs.map((o) => o.id) : [null]
     const found: Array<string | null> = []
     const defaults = new Map<string | null, string>()
+    let latest: { org: string | null; at: number } | null = null
     for (const org_id of candidates.slice(0, 20)) {
       // `scopes` only when `agents` is asked for: a grant with it and one without are different consents, so adding it asks again.
       const r = await iamOauth<{ grant: unknown }>('POST', '/grants/find', { user_id, client_id: client.client_id, resource, org_id, access, ...(wants_agents ? { scopes: [...access, AGENTS_SCOPE] } : {}) })
@@ -256,26 +288,25 @@ export function oauthRouter(kv: KvClient) {
         found.push(org_id)
         // A remembered grant keeps its default agent. (A grant from before 0.12 answers the connection itself as its
         // default and keeps working as it; the person chooses on the Agents tab or by refusing and agreeing again.)
-        const g = r.data.grant as { default_agent?: { name?: string; state?: string } }
+        const g = r.data.grant as { default_agent?: { name?: string; state?: string }; expires_at?: number }
+        // Only a default agent that can work now is remembered: a removed or suspended one would be refused at the exchange.
         if (g.default_agent?.name && g.default_agent.state === 'active') defaults.set(org_id, g.default_agent.name)
+        // Which grant was chosen last: the one that expires last (a new grant, and every refresh, move the idle expiry forward).
+        const at = g.expires_at ?? 0
+        if (!latest || at > latest.at) latest = { org: org_id, at }
       }
     }
-    const remembered = found.length === 1 ? found[0]! : undefined
-    if (found.length === 1 && !isLoopbackRedirect(redirect_uri) && defaults.has(found[0]!)) return issueCode(c, pending, client, remembered ?? null, access, defaults.get(found[0]!)!, 'approved_remembered')
+    // Consent is remembered only for a person with at most one organization: with several, the grant is bound to the one chosen
+    // the first time and the person must be able to pick another when reconnecting, so the page is always shown, with the
+    // organization they chose last preselected.
+    const remembered = latest ? (latest as { org: string | null }).org : undefined
+    if (orgs.length <= 1 && found.length === 1 && !isLoopbackRedirect(redirect_uri) && defaults.has(found[0]!)) return issueCode(c, pending, client, found[0] ?? null, access, defaults.get(found[0]!)!, 'approved_remembered')
 
     // 6. Ask. The pending request is remembered under an id only this person's session can answer.
-    // What the connection works as: the person's active agents, and a suggestion (iam's, else the client's name).
-    const mine = await agentsOf(user_id)
-    const last = await iamOauth<{ default_agent?: { name?: unknown } | null }>('GET', `/grants/suggest-default?user_id=${encodeURIComponent(user_id)}&client_id=${encodeURIComponent(client.client_id)}`)
-    const named = last.status === 200 ? last.data.default_agent?.name : undefined
-    const suggested = typeof named === 'string' && AGENT_NAME.test(named) ? named : slugOfName(client.client_name) || 'assistant'
     const id = random(24)
     await kv.set(`oauth:req:${id}`, JSON.stringify(pending), { ttl: REQ_TTL })
     audit('oauth_authorize', { ...req, outcome: 'ok', step: 'consent_shown', client: 'ui', ...personEnvelope(user_id), client_id: client.client_id, resource, resource_sent: sent ? 'yes' : 'no', scope: scope.join(' ') })
-    return respond(c, consentPage({
-      view: v, client_name: client.client_name, client_host: clientHost(client), redirect_host: new URL(redirect_uri).host, remembered_org: remembered ?? null,
-      localhost_only: client.redirect_uris.every(isLoopbackRedirect), resource, orgs, orgs_unavailable: !orgServiceUrl(), may_write, may_agents: wants_agents, actor, req: id, agents: mine, suggested_agent: suggested,
-    }))
+    return showConsent(c, v, { user_id, client, p: pending, id, actor, orgs, remembered_org: remembered ?? null })
   })
 
   app.post('/authorize', async (c) => {
@@ -293,21 +324,24 @@ export function oauthRouter(kv: KvClient) {
     const looked = await lookupClient(p.client_id)
     if (!looked.ok) { await kv.del(`oauth:req:${field('req')}`); return respond(c, oauthProblemPage(v, 'client'), 400) }
 
-    // What the connection works as: a name typed in the new-name field wins over the list; one of the two is required.
-    // A bad choice is shown to the person and the request is kept, so the browser's Back button works.
+    // What the connection works as: a name typed in the new-name field wins over the list; one of the two is required, and iam must
+    // say it can work (nothing is written by the check). A choice that cannot is shown to the person with the reason, with
+    // the request kept, and no code is issued: the exchange would refuse it.
     let default_agent = ''
     if (field('decision') === 'approve') {
       const typed = field('new_agent').trim(), picked = field('default_agent').trim()
-      if (typed) {
-        if (!AGENT_NAME.test(typed)) return respond(c, oauthProblemPage(v, 'agent'), 400)
-        default_agent = typed
-      } else if (picked) {
-        if (!((await agentsOf(user_id)) ?? []).some((a) => a.name === picked)) return respond(c, oauthProblemPage(v, 'agent'), 400)
-        default_agent = picked
-      } else {
-        // The choice is required: a form that sends neither (or empty ones) is not a way to a default agent the person never chose.
-        return respond(c, oauthProblemPage(v, 'agent'), 400)
+      const again = async (notice: Notice, status: 200 | 400 | 503 = 400) => {
+        const known = await iamOauth('POST', '/preview', { user_id, client_id: p.client_id, client_name: looked.client.client_name })
+        return showConsent(c, v, { user_id, client: looked.client, p, id: field('req'), actor: (known.data as { actor?: string }).actor ?? '', orgs: await membershipsOf(user_id), remembered_org: field('org_id') || null, notice, suggested: '', status })
       }
+      const chosen = typed || picked
+      if (!chosen) return again({ kind: 'missing' })
+      if (typed && !AGENT_NAME.test(typed)) return again({ kind: 'invalid', name: typed })
+      if (!typed && !((await agentsOf(user_id)) ?? []).some((a) => a.name === picked)) return again({ kind: 'unknown', name: picked })
+      const check = await checkAgent(user_id, chosen, p.client_id)
+      if (!check) return again({ kind: 'unavailable' }, 503)
+      if (!check.ok) return again(noticeOf(check, chosen))
+      default_agent = chosen
     }
     await kv.del(`oauth:req:${field('req')}`)
 

@@ -61,3 +61,19 @@ export function slugOfName(name: string): string {
   const s = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^[^a-z]+/, '').replace(/-+$/, '').slice(0, 32).replace(/-+$/, '')
   return AGENT_NAME.test(s) ? s : ''
 }
+
+export type AgentCheck = { ok: true; exists: boolean } | { ok: false; reason: 'invalid_agent_name' | 'agent_removed' | 'agent_inactive' | 'agent_limit' }
+
+/**
+ * Can this name be the person's default agent? Asked of iam (`POST /_/oauth/agents/check`), nothing written, by the same
+ * rules the grant is created with, so a code is never issued that `/token` would refuse. null when iam does not answer
+ * (or answers something that is not an answer): the caller shows "try again" and issues nothing.
+ */
+export async function checkAgent(user_id: string, name: string, client_id: string): Promise<AgentCheck | null> {
+  const r = await iamOauth<{ ok?: unknown; exists?: unknown; reason?: unknown }>('POST', '/agents/check', { user_id, name, client_id })
+  if (r.status !== 200) return null
+  if (r.data.ok === true) return { ok: true, exists: r.data.exists === true }
+  const reason = r.data.reason
+  if (r.data.ok === false && (reason === 'invalid_agent_name' || reason === 'agent_removed' || reason === 'agent_inactive' || reason === 'agent_limit')) return { ok: false, reason }
+  return null
+}

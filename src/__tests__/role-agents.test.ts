@@ -35,13 +35,22 @@ let authApp: { fetch: (r: Request) => Response | Promise<Response> }
 let iamApp: { fetch: (r: Request) => Response | Promise<Response> }
 let lines: string[] = []
 /** Lets a test change what iam answers on act-as, to prove auth does not trust it blindly. */
+/** What org-service answers, by person id; an organization service is configured only by the tests that need one. */
+let orgsFor: Record<string, Array<{ id: string; slug: string; name: string }>> = {}
+/** iam paths that do not answer. */
+let iamDown: RegExp | null = null
 let actAsHook: ((a: Record<string, any>) => Record<string, any>) | null = null
 
 const router = (async (input: string | URL | Request, init?: RequestInit) => {
   const req = new Request(input as never, init)
   const host = new URL(req.url).hostname
   if (host === 'auth.test') return authApp.fetch(req)
+  if (host === 'org.test') {
+    const sub = String(parseJwtPayload((req.headers.get('authorization') ?? '').replace(/^Bearer /, ''))?.['sub'])
+    return Response.json({ orgs: orgsFor[sub] ?? [] })
+  }
   if (host === 'iam.test') {
+    const down = iamDown; if (down && down.test(new URL(req.url).pathname)) return new Response('down', { status: 503 })
     const res = await iamApp.fetch(req)
     if (actAsHook && new URL(req.url).pathname.endsWith('/act-as') && res.status === 200) return Response.json(actAsHook(await res.json() as Record<string, any>))
     return res
@@ -74,6 +83,9 @@ beforeEach(() => {
   process.env['AUTH_MCP_AGENTS_RESOURCES'] = MCP
   delete process.env['IAM_AGENTS_PER_USER']
   actAsHook = null
+  orgsFor = {}
+  iamDown = null
+  delete process.env['ORG_SERVICE_URL']
   delete process.env['AUTH_AUDIT']
   resetRealm()
   setClientDocumentFetcher(null)
@@ -306,7 +318,7 @@ describe('the picker: this connection works as', () => {
     const req = /name="req" value="([^"]+)"/.exec(html)![1]!
     const before = await names(who)
     for (const body of [{}, { default_agent: '' }, { new_agent: '' }, { default_agent: '', new_agent: '   ' }]) {
-      const res = await form('/authorize', { req, decision: 'approve', access: 'write', ...body }, who.cookie)
+      const res = await form('/authorize', { req, decision: 'approve', access: 'write', ...(body as Record<string, string>) }, who.cookie)
       expect(res.status, JSON.stringify(body)).toBe(400)
       expect(await res.text()).toContain('Choose which agent')
     }
@@ -620,5 +632,155 @@ describe('/token exchange: agent and session', () => {
       expect((await exchange(t['access_token'], { agent: 'software', session: 's' }, await serviceToken('billing'))).status).toBe(401)
       expect(await names(who)).toEqual(['claude-code'])
     })
+  })
+})
+
+describe('2.8.1: a default agent that cannot work is never sent on to a code', () => {
+  const state = async (who: Person, id: string, st: string) => iamApp.fetch(new Request(`http://iam.test/api/agents/${id}`, { method: 'PATCH', headers: { 'content-type': 'application/json', authorization: `Bearer ${await human(who)}` }, body: JSON.stringify({ state: st }) }))
+  const remove = async (who: Person, id: string) => iamApp.fetch(new Request(`http://iam.test/api/agents/${id}`, { method: 'DELETE', headers: { authorization: `Bearer ${await human(who)}` } }))
+  const reqOf = (html: string) => /name="req" value="([^"]+)"/.exec(html)![1]!
+  /** A person with a role agent `research`, and a client whose name suggests it. */
+  async function withRole(name = 'research') {
+    const who = await person('ada')
+    await exchange((await tokens(who, withAgents))['access_token'], { agent: name })
+    const role = (await agentsOf(who)).find((a) => a.name === name)!
+    cimd({ client_name: 'Research' })
+    return { who, role }
+  }
+
+  it('the suggestion is the client\'s name; when that agent was removed it is not offered, the field is empty, and the page says why', async () => {
+    const { who, role } = await withRole()
+    expect((await remove(who, role.id)).status).toBe(200)
+    const page = await (await get(authorizeUrl().url, who.cookie)).text()
+    expect(page).toContain('<code>research</code> was removed')
+    expect(page).toMatch(/name="new_agent" value=""/)
+    expect(page).not.toMatch(/name="new_agent" value="research"/)
+  })
+
+  it('a suspended suggestion says it is suspended', async () => {
+    const { who, role } = await withRole()
+    expect((await state(who, role.id, 'suspended')).status).toBe(200)
+    const page = await (await get(authorizeUrl().url, who.cookie)).text()
+    expect(page).toContain('<code>research</code> is suspended')
+    expect(page).toMatch(/name="new_agent" value=""/)
+  })
+
+  it('an active suggestion is offered as before', async () => {
+    const { who } = await withRole()
+    const page = await (await get(authorizeUrl().url, who.cookie)).text()
+    expect(page).not.toContain('was removed')
+    expect(page).toContain('<option value="research" selected')
+  })
+
+  it('a removed name sent by the form: the consent page again with the reason, the request kept, no code, nothing created; another name then works', async () => {
+    const { who, role } = await withRole()
+    const html = await (await get(authorizeUrl().url, who.cookie)).text()
+    const req = reqOf(html)
+    expect((await remove(who, role.id)).status).toBe(200)
+    const before = await names(who)
+    const res = await form('/authorize', { req, decision: 'approve', access: 'write', new_agent: 'research' }, who.cookie)
+    expect(res.status).toBe(400)
+    expect(res.headers.get('location')).toBeNull()
+    const again = await res.text()
+    expect(again).toContain('<code>research</code> was removed')
+    expect(again).toContain(`name="req" value="${req}"`)
+    expect(await names(who)).toEqual(before)
+    const ok = await form('/authorize', { req, decision: 'approve', access: 'write', new_agent: 'writer' }, who.cookie)
+    expect(loc(ok).searchParams.get('code')).toBeTruthy()
+  })
+
+  it('a suspended name sent by the form is shown as suspended, and no code is issued', async () => {
+    const { who, role } = await withRole()
+    const req = reqOf(await (await get(authorizeUrl().url, who.cookie)).text())
+    expect((await state(who, role.id, 'suspended')).status).toBe(200)
+    lines = []
+    const res = await form('/authorize', { req, decision: 'approve', access: 'write', new_agent: 'research' }, who.cookie)
+    expect(res.status).toBe(400)
+    expect(await res.text()).toContain('is suspended')
+    expect(audited().filter((o) => o['step'] === 'approved' && o['default_agent'] === 'research')).toEqual([])
+  })
+
+  it('over the agent limit: shown as such, no code', async () => {
+    const who = await person('ada')
+    cimd()
+    const req = reqOf(await (await get(authorizeUrl().url, who.cookie)).text())
+    process.env['IAM_AGENTS_PER_USER'] = '1'
+    const res = await form('/authorize', { req, decision: 'approve', access: 'write', new_agent: 'research' }, who.cookie)
+    expect(res.status).toBe(400)
+    expect(await res.text()).toContain('limit of agents')
+    expect(await names(who)).toEqual([])
+  })
+
+  it('iam not answering the check: the page with "try again" (503), nothing issued, the request kept', async () => {
+    const who = await person('ada')
+    cimd()
+    const req = reqOf(await (await get(authorizeUrl().url, who.cookie)).text())
+    iamDown = /\/agents\/check$/
+    const res = await form('/authorize', { req, decision: 'approve', access: 'write', new_agent: 'research' }, who.cookie)
+    expect(res.status).toBe(503)
+    expect(res.headers.get('location')).toBeNull()
+    expect(await res.text()).toContain('Try again')
+    iamDown = null
+    expect(loc(await form('/authorize', { req, decision: 'approve', access: 'write', new_agent: 'research' }, who.cookie)).searchParams.get('code')).toBeTruthy()
+  })
+
+  it('a remembered https grant does not reuse a suspended or removed default: the page is shown, not a code', async () => {
+    const who = await person('ada')
+    cimd({ redirect_uris: [HTTPS_CB] })
+    await tokens(who, { redirect_uri: HTTPS_CB }, { decision: 'approve', access: 'write', new_agent: 'research' })
+    expect((await get(authorizeUrl({ redirect_uri: HTTPS_CB }).url, who.cookie)).status).toBe(302)
+    const role = (await agentsOf(who)).find((a) => a.name === 'research')!
+    expect((await state(who, role.id, 'suspended')).status).toBe(200)
+    const suspended = await get(authorizeUrl({ redirect_uri: HTTPS_CB }).url, who.cookie)
+    expect(suspended.status).toBe(200)
+    expect(await suspended.text()).toContain('This connection works as')
+    expect((await state(who, role.id, 'active')).status).toBe(200)
+    expect((await get(authorizeUrl({ redirect_uri: HTTPS_CB }).url, who.cookie)).status).toBe(302)
+    expect((await remove(who, role.id)).status).toBe(200)
+    expect((await get(authorizeUrl({ redirect_uri: HTTPS_CB }).url, who.cookie)).status).toBe(200)
+  })
+})
+
+describe('2.8.1: a connection is not locked to its first organization', () => {
+  const ACME = { id: 'org-acme', slug: 'acme', name: 'Acme' }, GLOBEX = { id: 'org-globex', slug: 'globex', name: 'Globex' }
+
+  it('a person with two organizations who reconnects always sees the page, with the last chosen organization and agent preselected, and can pick the other', async () => {
+    const who = await person('ada')
+    process.env['ORG_SERVICE_URL'] = 'http://org.test'
+    orgsFor[who.id] = [ACME, GLOBEX]
+    cimd({ redirect_uris: [HTTPS_CB] })
+    const first = await tokens(who, { redirect_uri: HTTPS_CB }, { decision: 'approve', access: 'write', org_id: ACME.id, new_agent: 'research' })
+    expect(claims((await json(await exchange(first['access_token'])))['access_token'])['org_id']).toBe(ACME.id)
+    // reconnect, an https callback: not skipped
+    const res = await get(authorizeUrl({ redirect_uri: HTTPS_CB }).url, who.cookie)
+    expect(res.status).toBe(200)
+    const html = await res.text()
+    expect(html).toContain(`<option value="${ACME.id}" selected`)
+    expect(html).toContain('<option value="research" selected')
+    expect(audited().filter((o) => o['step'] === 'approved_remembered')).toEqual([])
+    // pick the other one (a whole new flow: a code needs its own verifier)
+    const second = await tokens(who, { redirect_uri: HTTPS_CB }, { decision: 'approve', access: 'write', org_id: GLOBEX.id, default_agent: 'research' })
+    expect(claims((await json(await exchange(second['access_token'])))['access_token'])['org_id']).toBe(GLOBEX.id)
+    // and the one after remembers the last chosen: Globex
+    const third = await (await get(authorizeUrl({ redirect_uri: HTTPS_CB }).url, who.cookie)).text()
+    expect(third).toContain(`<option value="${GLOBEX.id}" selected`)
+  })
+
+  it('a person with one organization (or none) is still remembered on an https callback', async () => {
+    const who = await person('ada')
+    process.env['ORG_SERVICE_URL'] = 'http://org.test'
+    orgsFor[who.id] = [ACME]
+    cimd({ redirect_uris: [HTTPS_CB] })
+    await tokens(who, { redirect_uri: HTTPS_CB }, { decision: 'approve', access: 'write', org_id: ACME.id, new_agent: 'research' })
+    expect((await get(authorizeUrl({ redirect_uri: HTTPS_CB }).url, who.cookie)).status).toBe(302)
+    expect(lastAudit('oauth_authorize')).toMatchObject({ step: 'approved_remembered', org_id: ACME.id, default_agent: 'research' })
+  })
+
+  it('a loopback redirect always sees the page, with one organization or two', async () => {
+    const who = await person('ada')
+    process.env['ORG_SERVICE_URL'] = 'http://org.test'
+    orgsFor[who.id] = [ACME]
+    await tokens(who, undefined, { decision: 'approve', access: 'write', org_id: ACME.id, new_agent: 'research' })
+    expect((await get(authorizeUrl().url, who.cookie)).status).toBe(200)
   })
 })

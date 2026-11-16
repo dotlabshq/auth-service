@@ -31,12 +31,20 @@ export interface ConsentView {
   agents?: Array<{ id: string; name: string }> | null
   /** Preselected: the agent this client last used, else the client's name. */
   suggested_agent?: string
+  /** Said above the picker: why the choice was not accepted, or why the suggestion is not offered. */
+  agent_notice?: { kind: 'removed' | 'suspended' | 'limit' | 'invalid' | 'missing' | 'unavailable' | 'unknown'; name?: string }
   /** `agent:<name>@<handle>`. */
   actor: string
   /** The organization chosen last time, selected again. */
   remembered_org?: string | null
   /** The id the form posts back, tying the answer to this request and this person. */
   req: string
+}
+
+const NOTICE = { removed: 'oauthNoticeRemoved', suspended: 'oauthNoticeSuspended', limit: 'oauthNoticeLimit', invalid: 'oauthNoticeInvalid', missing: 'oauthNoticeMissing', unavailable: 'oauthNoticeUnavailable', unknown: 'oauthNoticeUnknown' } as const
+function notice(v: ConsentView, t: ReturnType<typeof strings>): string {
+  const n = v.agent_notice
+  return n ? `<p class="error" role="alert">${t(NOTICE[n.kind], { name: n.name ?? '' })}</p>` : ''
 }
 
 /** "This connection works as": the person's agents, or a new name. No script: a select and a text field. */
@@ -50,6 +58,7 @@ function picker(v: ConsentView, t: ReturnType<typeof strings>): string {
     : ''
   return `<fieldset>
         <legend>${t('oauthWorksAs')}</legend>
+        ${notice(v, t)}
         ${options}
         <label>${t('oauthAgentNewLabel')} <input type="text" name="new_agent" value="${existing ? '' : e(suggested)}" pattern="[a-z][a-z0-9\\-]{0,31}" maxlength="32" autocomplete="off" spellcheck="false"${list.length ? '' : ' required'}></label>
         <p class="quiet">${t('oauthWorksAsHint')}</p>
