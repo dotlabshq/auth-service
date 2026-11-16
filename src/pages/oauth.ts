@@ -51,7 +51,7 @@ function picker(v: ConsentView, t: ReturnType<typeof strings>): string {
   return `<fieldset>
         <legend>${t('oauthWorksAs')}</legend>
         ${options}
-        <label>${t('oauthAgentNewLabel')} <input type="text" name="new_agent" value="${existing ? '' : e(suggested)}" pattern="[a-z][a-z0-9\\-]{0,31}" maxlength="32" autocomplete="off" spellcheck="false"></label>
+        <label>${t('oauthAgentNewLabel')} <input type="text" name="new_agent" value="${existing ? '' : e(suggested)}" pattern="[a-z][a-z0-9\\-]{0,31}" maxlength="32" autocomplete="off" spellcheck="false"${list.length ? '' : ' required'}></label>
         <p class="quiet">${t('oauthWorksAsHint')}</p>
       </fieldset>`
 }

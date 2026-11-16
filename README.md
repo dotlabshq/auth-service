@@ -595,9 +595,10 @@ Now the connection is only a **credential**; every call works as a named agent o
 
 - **Consent page, "This connection works as"**: the person's active agents (the agents that stand for OAuth connections are not
   offered), or a new name (`^[a-z][a-z0-9-]{0,31}$`), preselected with the agent this client last used (iam's `suggested_agent`
-  on `/preview` when it gives one), else the client's name. English and Turkish. A name typed wins over the list; a form that
-  sends neither gets the suggestion, never the connection itself. A name that does not match, or a list value that is not one of
-  the person's agents, is a 400 page and the request is kept (Back works). The choice is `default_agent` on `POST
+  on `/preview` when it gives one), else the client's name. English and Turkish. A name typed wins over the list. **The choice is required**: the name field is `required` when there is no list, and a POST that
+  sends neither `default_agent` nor `new_agent` (or empty ones) is a 400 page with the request kept, never a silent fallback. The
+  client's name may be the prefilled suggestion, even when it is the connection agent's own name. A name that does not match, or a
+  list value that is not one of the person's agents, is the same 400 page (Back works). The choice is `default_agent` on `POST
   /_/oauth/grants`; iam resolves or creates it by the rules of acting as (name, limits, removed name not re-created, suspended
   refused) **without needing the `agents` scope**: the person chose it on this page. The audit lines record it (`default_agent`).
 - **Remembered consent** skips the page only for a grant that already has a chosen default agent. A grant from before 0.12 (its

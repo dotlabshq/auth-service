@@ -127,7 +127,9 @@ async function consent(who: Person, over: Record<string, string | undefined> = {
   expect(page.status).toBe(200)
   const html = await page.text()
   const req = /name="req" value="([^"]+)"/.exec(html)![1]!
-  const res = await form('/authorize', { req, ...answer }, who.cookie)
+  // The choice of what the connection works as is required: a helper that approves says it.
+  const body = answer['decision'] === 'approve' && !answer['default_agent'] && !answer['new_agent'] ? { ...answer, new_agent: 'claude-code' } : answer
+  const res = await form('/authorize', { req, ...body }, who.cookie)
   return { ...a, html, res, redirect: loc(res), code: loc(res).searchParams.get('code') }
 }
 async function tokens(who: Person, over: Record<string, string | undefined> = {}, answer?: Record<string, string>) {
@@ -369,7 +371,7 @@ describe('the consent answer', () => {
     expect((await form('/authorize', { req, decision: 'approve' }, bob.cookie)).status).toBe(403)
     expect((await form('/authorize', { req, decision: 'approve' })).status).toBe(401)
     expect((await form('/authorize', { req: 'nonsense', decision: 'approve' }, ada.cookie)).status).toBe(400)
-    expect(loc(await form('/authorize', { req, decision: 'approve' }, ada.cookie)).searchParams.get('code')).toBeTruthy()
+    expect(loc(await form('/authorize', { req, decision: 'approve', new_agent: 'claude-code' }, ada.cookie)).searchParams.get('code')).toBeTruthy()
     expect((await form('/authorize', { req, decision: 'approve' }, ada.cookie)).status).toBe(400)
   })
 

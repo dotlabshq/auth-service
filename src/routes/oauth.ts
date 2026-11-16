@@ -293,8 +293,7 @@ export function oauthRouter(kv: KvClient) {
     const looked = await lookupClient(p.client_id)
     if (!looked.ok) { await kv.del(`oauth:req:${field('req')}`); return respond(c, oauthProblemPage(v, 'client'), 400) }
 
-    // What the connection works as: a name typed in the new-name field wins over the list; with neither the
-    // suggestion stands (a form that omits both is not a way to a connection that works as itself).
+    // What the connection works as: a name typed in the new-name field wins over the list; one of the two is required.
     // A bad choice is shown to the person and the request is kept, so the browser's Back button works.
     let default_agent = ''
     if (field('decision') === 'approve') {
@@ -306,7 +305,8 @@ export function oauthRouter(kv: KvClient) {
         if (!((await agentsOf(user_id)) ?? []).some((a) => a.name === picked)) return respond(c, oauthProblemPage(v, 'agent'), 400)
         default_agent = picked
       } else {
-        default_agent = slugOfName(looked.client.client_name) || 'assistant'
+        // The choice is required: a form that sends neither (or empty ones) is not a way to a default agent the person never chose.
+        return respond(c, oauthProblemPage(v, 'agent'), 400)
       }
     }
     await kv.del(`oauth:req:${field('req')}`)

@@ -134,7 +134,9 @@ async function consent(who: Person, over: Record<string, string | undefined> = {
   expect(page.status).toBe(200)
   const html = await page.text()
   const req = /name="req" value="([^"]+)"/.exec(html)![1]!
-  const res = await form('/authorize', { req, ...answer }, who.cookie)
+  // The choice of what the connection works as is required: a helper that approves says it.
+  const body = answer['decision'] === 'approve' && !answer['default_agent'] && !answer['new_agent'] ? { ...answer, new_agent: 'claude-code' } : answer
+  const res = await form('/authorize', { req, ...body }, who.cookie)
   return { ...a, html, res, redirect: loc(res), code: loc(res).searchParams.get('code') }
 }
 async function tokens(who: Person, over: Record<string, string | undefined> = {}, answer?: Record<string, string>): Promise<Record<string, any>> {
@@ -297,12 +299,28 @@ describe('the picker: this connection works as', () => {
     expect(claims((await json(await exchange(t['access_token'])))['access_token'])['actor']).toBe(`agent:other@${who.handle}`)
   })
 
-  it('a form that sends neither gets the suggestion, never the connection itself', async () => {
+  it('the choice is required: a POST with neither field, or empty ones, is the 400 page with the request kept, and nothing is created', async () => {
     const who = await person('ada')
-    const t = await tokens(who)
-    const b = claims((await json(await exchange(t['access_token'])))['access_token'])
-    expect(b['act']).toBeTruthy()
-    expect(b['act']['sub']).toBe(claims(t['access_token'])['sub'])
+    cimd()
+    const html = await (await get(authorizeUrl().url, who.cookie)).text()
+    const req = /name="req" value="([^"]+)"/.exec(html)![1]!
+    const before = await names(who)
+    for (const body of [{}, { default_agent: '' }, { new_agent: '' }, { default_agent: '', new_agent: '   ' }]) {
+      const res = await form('/authorize', { req, decision: 'approve', access: 'write', ...body }, who.cookie)
+      expect(res.status, JSON.stringify(body)).toBe(400)
+      expect(await res.text()).toContain('Choose which agent')
+    }
+    expect(await names(who)).toEqual(before)
+    // the request is kept: choosing now works
+    expect(loc(await form('/authorize', { req, decision: 'approve', access: 'write', new_agent: 'research' }, who.cookie)).searchParams.get('code')).toBeTruthy()
+  })
+
+  it('the name field is required in the form when there is no list to choose from, and a client\'s name may be the prefilled suggestion', async () => {
+    const who = await person('ada')
+    cimd()
+    const page = await (await get(authorizeUrl().url, who.cookie)).text()
+    expect(page).toMatch(/name="new_agent"[^>]* required/)
+    expect(page).toMatch(/name="new_agent" value="claude-code"/)
   })
 
   it.each([['an upper-case name', 'Research'], ['a leading digit', '9x'], ['a space', 'my agent'], ['33 characters', 'a'.repeat(33)], ['an at sign', 'a@b']])('a new name with %s: a 400 page, the request is kept, nothing is created', async (_n, bad) => {
