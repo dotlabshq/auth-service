@@ -588,6 +588,29 @@ no `agents` scope is exactly 2.6.5.
   `session_id`; `actor` is the role agent. Refusals carry `agent`, `session_id` when valid, and `grant_id`.
 - Needs iam 0.11.0 for `agent=` and for the `agents` scope; without `agent`, iam 0.10.1 is enough.
 
+### A connection never works as itself (2.8.0)
+
+Design §3a. Before, a connection that named no role worked as its own agent (`claude-code@basri`), which stands for no role.
+Now the connection is only a **credential**; every call works as a named agent of the person.
+
+- **Consent page, "This connection works as"**: the person's active agents (the agents that stand for OAuth connections are not
+  offered), or a new name (`^[a-z][a-z0-9-]{0,31}$`), preselected with the agent this client last used (iam's `suggested_agent`
+  on `/preview` when it gives one), else the client's name. English and Turkish. A name typed wins over the list; a form that
+  sends neither gets the suggestion, never the connection itself. A name that does not match, or a list value that is not one of
+  the person's agents, is a 400 page and the request is kept (Back works). The choice is `default_agent` on `POST
+  /_/oauth/grants`; iam resolves or creates it by the rules of acting as (name, limits, removed name not re-created, suspended
+  refused) **without needing the `agents` scope**: the person chose it on this page. The audit lines record it (`default_agent`).
+- **Remembered consent** skips the page only for a grant that already has a chosen default agent. A grant from before 0.12 (its
+  default is the connection itself) is asked once.
+- **Exchange without `agent`**: the live answer of `GET /_/oauth/grants/:id` carries `default_agent { id, name, actor, state }`;
+  the realm token is for that agent (`sub`, `actor`) with **`act { sub, actor }` = the connection, always**. A grant with no default
+  agent chosen (old grants) works as the connection: `sub` = `act.sub`, `act` still present. A default agent that is suspended or
+  removed is `400 invalid_target` with `error_description` `agent_inactive` or `agent_removed`; the grant is not revoked, and the
+  person picks another default on the Agents tab.
+- **Exchange with `agent`**: as 2.7.0 (needs the `agents` scope); `act` present.
+- The MCP **access token** is still the connection's own (it is the credential); only the realm token names the working agent.
+- Needs iam 0.12.0.
+
 ## Known gaps
 
 - **No revocation.** A token is valid until it expires; signing out clears cookies

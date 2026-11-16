@@ -27,12 +27,33 @@ export interface ConsentView {
   may_write: boolean
   /** Whether the grant will include the `agents` scope: it may work as any of the person's agents. */
   may_agents?: boolean
+  /** The person's active agents (not connections), for "This connection works as". null: iam did not say; only the name field is offered. */
+  agents?: Array<{ id: string; name: string }> | null
+  /** Preselected: the agent this client last used, else the client's name. */
+  suggested_agent?: string
   /** `agent:<name>@<handle>`. */
   actor: string
   /** The organization chosen last time, selected again. */
   remembered_org?: string | null
   /** The id the form posts back, tying the answer to this request and this person. */
   req: string
+}
+
+/** "This connection works as": the person's agents, or a new name. No script: a select and a text field. */
+function picker(v: ConsentView, t: ReturnType<typeof strings>): string {
+  const e = escapeHtml
+  const list = v.agents ?? []
+  const suggested = v.suggested_agent ?? ''
+  const existing = list.some((a) => a.name === suggested)
+  const options = list.length
+    ? `<select name="default_agent">${list.map((a) => `<option value="${e(a.name)}"${a.name === suggested ? ' selected' : ''}>${e(a.name)}</option>`).join('')}<option value=""${existing ? '' : ' selected'}>${t('oauthAgentNew')}</option></select>`
+    : ''
+  return `<fieldset>
+        <legend>${t('oauthWorksAs')}</legend>
+        ${options}
+        <label>${t('oauthAgentNewLabel')} <input type="text" name="new_agent" value="${existing ? '' : e(suggested)}" pattern="[a-z][a-z0-9\\-]{0,31}" maxlength="32" autocomplete="off" spellcheck="false"></label>
+        <p class="quiet">${t('oauthWorksAsHint')}</p>
+      </fieldset>`
 }
 
 export function consentPage(v: ConsentView): string {
@@ -59,6 +80,7 @@ export function consentPage(v: ConsentView): string {
         <label><input type="radio" name="access" value="read"${v.may_write ? '' : ' checked'}> ${t('oauthRead')}</label>
         ${v.may_write ? `<label><input type="radio" name="access" value="write" checked> ${t('oauthWrite')}</label>` : ''}
       </fieldset>
+      ${picker(v, t)}
       <p>${t('oauthActs', { actor: v.actor })}</p>
       ${v.may_agents ? `<p>${t('oauthAgents')}</p>` : ''}
       <button class="btn primary" type="submit" name="decision" value="approve">${t('oauthApprove')}</button>
@@ -68,9 +90,9 @@ export function consentPage(v: ConsentView): string {
 }
 
 /** A request that cannot be completed and cannot safely be sent back to the client (unknown client, redirect not registered). */
-export function oauthProblemPage(view: PageView, problem: 'client' | 'redirect' | 'request' | 'expired' | 'person'): string {
+export function oauthProblemPage(view: PageView, problem: 'client' | 'redirect' | 'request' | 'expired' | 'person' | 'agent'): string {
   const t = strings(view.lang)
-  const text = t(({ client: 'oauthBadClient', redirect: 'oauthBadRedirect', request: 'oauthBadRequest', expired: 'oauthExpired', person: 'oauthWrongPerson' } as const)[problem])
+  const text = t(({ client: 'oauthBadClient', redirect: 'oauthBadRedirect', request: 'oauthBadRequest', expired: 'oauthExpired', person: 'oauthWrongPerson', agent: 'oauthBadAgent' } as const)[problem])
   return layout({
     title: t('oauthBad'),
     view,

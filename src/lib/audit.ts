@@ -44,6 +44,8 @@ export interface AuditFields {
   act?: string
   /** The MCP session (a client window) the exchange was made for. */
   session_id?: string
+  /** The agent a connection works as by default (chosen on the consent page); `actor` is the one that worked. */
+  default_agent?: string
   /** The role agent's name the exchange asked for (`software`), when it asked for one. */
   agent?: string
   client?: string
@@ -72,7 +74,7 @@ export interface AuditFields {
 /** The only keys a line may have, in the order they are written. */
 const KEYS = [
   'outcome', 'reason', 'request_id', 'ip', 'user_agent',
-  'kind', 'actor', 'actor_id', 'on_behalf_of', 'via', 'credential_id', 'act', 'session_id', 'agent', 'client', 'org_id',
+  'kind', 'actor', 'actor_id', 'on_behalf_of', 'via', 'credential_id', 'act', 'session_id', 'agent', 'default_agent', 'client', 'org_id',
   'email', 'client_id', 'degraded', 'step', 'resource', 'resource_sent', 'grant_id', 'scope', 'field', 'redirect_hosts',
 ] as const
 

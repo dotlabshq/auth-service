@@ -34,3 +34,30 @@ export async function membershipsOf(user_id: string): Promise<Membership[]> {
   const { orgs } = (await res.json().catch(() => ({}))) as { orgs?: Array<{ id?: unknown; slug?: unknown; name?: unknown }> }
   return (orgs ?? []).flatMap((o) => (typeof o.id === 'string' && typeof o.slug === 'string' ? [{ id: o.id, slug: o.slug, name: typeof o.name === 'string' ? o.name : o.slug }] : []))
 }
+
+/** A role agent's name, as iam's rule 5 has it. iam decides; this only spares it the junk. */
+export const AGENT_NAME = /^[a-z][a-z0-9-]{0,31}$/
+
+export interface PickableAgent { id: string; name: string }
+
+/**
+ * The person's own active agents, for the "this connection works as" picker: asked of iam as that person
+ * (`GET /api/agents`). An agent that stands for an OAuth client (a connection) is not offered: a connection
+ * never works as itself. None when iam does not answer: the page then offers only the name field.
+ */
+export async function agentsOf(user_id: string): Promise<PickableAgent[] | null> {
+  const base = (process.env['IAM_SERVICE_URL'] ?? '').replace(/\/+$/, '')
+  if (!base) return null
+  const token = await mintIdentityToken({ sub: user_id, type: 'human', expires_in_seconds: 60 })
+  if (!token) return null
+  const res = await fetch(`${base}/api/agents`, { headers: { authorization: `Bearer ${token}` } }).catch(() => null)
+  if (!res?.ok) return null
+  const { agents } = (await res.json().catch(() => ({}))) as { agents?: Array<Record<string, unknown>> }
+  return (agents ?? []).flatMap((a) => (typeof a['id'] === 'string' && typeof a['name'] === 'string' && a['state'] === 'active' && !a['client_id'] ? [{ id: a['id'], name: a['name'] }] : []))
+}
+
+/** What a client's name makes of a role name: `Claude Code` is `claude-code`. Empty when nothing usable is left. */
+export function slugOfName(name: string): string {
+  const s = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^[^a-z]+/, '').replace(/-+$/, '').slice(0, 32).replace(/-+$/, '')
+  return AGENT_NAME.test(s) ? s : ''
+}

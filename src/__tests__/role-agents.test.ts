@@ -240,29 +240,198 @@ describe('consent and the agents scope', () => {
   })
 })
 
+describe('the picker: this connection works as', () => {
+  const pick = async (who: Person, answer: Record<string, string>, over: Record<string, string | undefined> = {}) => {
+    const c = await consent(who, over, { decision: 'approve', access: 'write', ...answer })
+    return c
+  }
+
+  it('is on the consent page, with the person\'s active agents (never a connection) and a name field preselected with the client\'s name', async () => {
+    const who = await person('ada')
+    await tokens(who) // makes the connection agent `claude-code` and a default
+    await exchange((await tokens(who, withAgents))['access_token'], { agent: 'software' }) // a role agent exists now
+    cimd()
+    const page = await (await get(authorizeUrl().url, who.cookie)).text()
+    expect(page).toContain('This connection works as')
+    expect(page).toContain('name="default_agent"')
+    expect(page).toContain('<option value="software"')
+    expect(page).not.toContain('<option value="claude-code"')
+    expect(page).toContain('name="new_agent"')
+  })
+
+  it('first time: the name field holds the suggestion (the client\'s name), and Turkish is there too', async () => {
+    const who = await person('ada')
+    cimd()
+    const page = await (await get(authorizeUrl().url, who.cookie)).text()
+    expect(page).toMatch(/name="new_agent" value="claude-code"/)
+    const tr = await (await get(authorizeUrl().url, `${who.cookie}; bw_lang=tr`)).text()
+    expect(tr).toContain('Bu bağlantı şu ajan olarak çalışır')
+  })
+
+  it('a typed new name is created for the person and is what the connection works as', async () => {
+    const who = await person('ada')
+    const c = await pick(who, { new_agent: 'research' })
+    expect(c.code).toBeTruthy()
+    expect(lastAudit('oauth_authorize')).toMatchObject({ step: 'approved', default_agent: 'research' })
+    const t = await json(await form('/token', { grant_type: 'authorization_code', client_id: CIMD, code: c.code!, code_verifier: c.verifier, redirect_uri: REDIRECT }))
+    expect(lastAudit('oauth_token')).toMatchObject({ step: 'code_exchanged', default_agent: 'research' })
+    const b = claims((await json(await exchange(t['access_token'])))['access_token'])
+    expect(b['actor']).toBe(`agent:research@${who.handle}`)
+    expect(await names(who)).toContain('research')
+  })
+
+  it('an existing agent chosen from the list is used, none is created', async () => {
+    const who = await person('ada')
+    await exchange((await tokens(who, withAgents))['access_token'], { agent: 'software' })
+    const before = await names(who)
+    const t = await tokens(who, undefined, { decision: 'approve', access: 'write', default_agent: 'software' })
+    const b = claims((await json(await exchange(t['access_token'])))['access_token'])
+    expect(b['actor']).toBe(`agent:software@${who.handle}`)
+    expect(await names(who)).toEqual(before)
+  })
+
+  it('a typed name wins over the list', async () => {
+    const who = await person('ada')
+    await exchange((await tokens(who, withAgents))['access_token'], { agent: 'software' })
+    const t = await tokens(who, undefined, { decision: 'approve', access: 'write', default_agent: 'software', new_agent: 'other' })
+    expect(claims((await json(await exchange(t['access_token'])))['access_token'])['actor']).toBe(`agent:other@${who.handle}`)
+  })
+
+  it('a form that sends neither gets the suggestion, never the connection itself', async () => {
+    const who = await person('ada')
+    const t = await tokens(who)
+    const b = claims((await json(await exchange(t['access_token'])))['access_token'])
+    expect(b['act']).toBeTruthy()
+    expect(b['act']['sub']).toBe(claims(t['access_token'])['sub'])
+  })
+
+  it.each([['an upper-case name', 'Research'], ['a leading digit', '9x'], ['a space', 'my agent'], ['33 characters', 'a'.repeat(33)], ['an at sign', 'a@b']])('a new name with %s: a 400 page, the request is kept, nothing is created', async (_n, bad) => {
+    const who = await person('ada')
+    cimd()
+    const a = authorizeUrl()
+    const html = await (await get(a.url, who.cookie)).text()
+    const req = /name="req" value="([^"]+)"/.exec(html)![1]!
+    const before = await names(who)
+    const res = await form('/authorize', { req, decision: 'approve', access: 'write', new_agent: bad }, who.cookie)
+    expect(res.status).toBe(400)
+    expect(await names(who)).toEqual(before)
+    // back, and a good name: the same request still works
+    const ok = await form('/authorize', { req, decision: 'approve', access: 'write', new_agent: 'research' }, who.cookie)
+    expect(loc(ok).searchParams.get('code')).toBeTruthy()
+  })
+
+  it('a list value that is not one of the person\'s agents (another person\'s, or a connection) is a 400 page', async () => {
+    const who = await person('ada'), other = await person('bob')
+    await exchange((await tokens(other, withAgents))['access_token'], { agent: 'secret' })
+    await tokens(who)
+    for (const name of ['secret', 'claude-code']) {
+      cimd()
+      const html = await (await get(authorizeUrl().url, who.cookie)).text()
+      const req = /name="req" value="([^"]+)"/.exec(html)![1]!
+      expect((await form('/authorize', { req, decision: 'approve', access: 'write', default_agent: name }, who.cookie)).status, name).toBe(400)
+    }
+  })
+
+  it('refusing stores nothing: no agent is created for a refused consent', async () => {
+    const who = await person('ada')
+    const c = await consent(who, {}, { decision: 'deny', new_agent: 'research' })
+    expect(loc(c.res).searchParams.get('error')).toBe('access_denied')
+    expect(await names(who)).not.toContain('research')
+  })
+
+  it('a remembered https grant with a chosen default is not asked again, and keeps its default agent', async () => {
+    const who = await person('ada')
+    cimd({ redirect_uris: [HTTPS_CB] })
+    await tokens(who, { redirect_uri: HTTPS_CB }, { decision: 'approve', access: 'write', new_agent: 'research' })
+    const again = await get(authorizeUrl({ redirect_uri: HTTPS_CB }).url, who.cookie)
+    expect(again.status).toBe(302)
+    expect(lastAudit('oauth_authorize')).toMatchObject({ step: 'approved_remembered', default_agent: 'research' })
+  })
+
+  describe('the default agent cannot work', () => {
+    const state = async (who: Person, id: string, st: string) => iamApp.fetch(new Request(`http://iam.test/api/agents/${id}`, { method: 'PATCH', headers: { 'content-type': 'application/json', authorization: `Bearer ${await human(who)}` }, body: JSON.stringify({ state: st }) }))
+
+    it('suspended: 400 invalid_target agent_inactive, the connection is not revoked, and agent= still works; resumed, it works again', async () => {
+      const who = await person('ada')
+      const t = await tokens(who, withAgents, { decision: 'approve', access: 'write', new_agent: 'software' })
+      const role = (await agentsOf(who)).find((a) => a.name === 'software')!
+      expect((await state(who, role.id, 'suspended')).status).toBe(200)
+      const res = await exchange(t['access_token'])
+      expect(res.status).toBe(400)
+      expect(await json(res)).toMatchObject({ error: 'invalid_target', error_description: 'agent_inactive' })
+      expect(lastAudit('oauth_token')).toMatchObject({ outcome: 'refused', reason: 'agent_inactive' })
+      // another agent by name still works: the connection is alive
+      expect(claims((await json(await exchange(t['access_token'], { agent: 'platform' })))['access_token'])['actor']).toBe(`agent:platform@${who.handle}`)
+      expect((await state(who, role.id, 'active')).status).toBe(200)
+      expect((await exchange(t['access_token'])).status).toBe(200)
+    })
+
+    it('removed: 400 invalid_target agent_removed', async () => {
+      const who = await person('ada')
+      const t = await tokens(who, undefined, { decision: 'approve', access: 'write', new_agent: 'software' })
+      const role = (await agentsOf(who)).find((a) => a.name === 'software')!
+      expect((await iamApp.fetch(new Request(`http://iam.test/api/agents/${role.id}`, { method: 'DELETE', headers: { authorization: `Bearer ${await human(who)}` } }))).status).toBe(200)
+      const res = await exchange(t['access_token'])
+      expect(res.status).toBe(400)
+      expect(await json(res)).toMatchObject({ error: 'invalid_target', error_description: 'agent_removed' })
+    })
+  })
+
+  it('agent= overrides the default: the token is for that agent, act present', async () => {
+    const who = await person('ada')
+    const t = await tokens(who, withAgents, { decision: 'approve', access: 'write', new_agent: 'software' })
+    const b = claims((await json(await exchange(t['access_token'], { agent: 'platform' })))['access_token'])
+    expect(b).toMatchObject({ actor: `agent:platform@${who.handle}`, act: { actor: `agent:claude-code@${who.handle}` } })
+  })
+
+  it('a default agent needs no agents scope: a read/write grant without it still works as its default', async () => {
+    const who = await person('ada')
+    const t = await tokens(who, { scope: 'read write' }, { decision: 'approve', access: 'write', new_agent: 'software' })
+    expect(t['scope']).toBe('read write')
+    expect(claims((await json(await exchange(t['access_token'])))['access_token'])['actor']).toBe(`agent:software@${who.handle}`)
+    expect((await exchange(t['access_token'], { agent: 'platform' })).status).toBe(403)
+  })
+})
+
 describe('/token exchange: agent and session', () => {
   async function connection(who: Person, over: Record<string, string | undefined> = {}, answer?: Record<string, string>): Promise<Record<string, any> & { c: Record<string, any> }> {
     const t = await tokens(who, over, answer)
     return { ...t, c: claims(t['access_token']) }
   }
 
-  it('without agent it is exactly the old exchange: the connection itself, no act, no sid', async () => {
+  it('without agent the token is for the default agent chosen on the consent page, with the connection in act, always', async () => {
     const who = await person('ada')
-    const t = await connection(who, withAgents)
+    const t = await connection(who, withAgents, { decision: 'approve', access: 'write', new_agent: 'software' })
     const b = claims((await json(await exchange(t['access_token'])))['access_token'])
-    expect(b).toMatchObject({ sub: t.c['sub'], actor: `agent:claude-code@${who.handle}`, kind: 'agent', via: 'oauth', access: ['read', 'write'] })
-    expect(b['act']).toBeUndefined()
+    const role = (await agentsOf(who)).find((a) => a.name === 'software')!
+    expect(b).toMatchObject({ sub: role.id, actor: `agent:software@${who.handle}`, kind: 'agent', via: 'oauth', access: ['read', 'write'], act: { sub: t.c['sub'], actor: `agent:claude-code@${who.handle}` } })
+    expect(b['sub']).not.toBe(b['act']['sub'])
     expect(b['sid']).toBeUndefined()
-    expect(await names(who)).toEqual(['claude-code'])
+    expect(lastAudit('oauth_token')).toMatchObject({ step: 'exchanged', default_agent: 'software', actor: `agent:software@${who.handle}`, act: `agent:claude-code@${who.handle}` })
   })
 
-  it('with session only, sid is in the token and the principal is still the connection', async () => {
+  it('with session only, sid is in the token and the principal is the default agent', async () => {
     const who = await person('ada')
-    const t = await connection(who)
+    const t = await connection(who, undefined, { decision: 'approve', access: 'write', new_agent: 'platform' })
     const b = claims((await json(await exchange(t['access_token'], { session: 'sess-ABC_123' })))['access_token'])
-    expect(b).toMatchObject({ sub: t.c['sub'], sid: 'sess-ABC_123' })
-    expect(b['act']).toBeUndefined()
-    expect(lastAudit('oauth_token')).toMatchObject({ step: 'exchanged', session_id: 'sess-ABC_123', actor: `agent:claude-code@${who.handle}` })
+    expect(b).toMatchObject({ sid: 'sess-ABC_123', actor: `agent:platform@${who.handle}`, act: { sub: t.c['sub'] } })
+  })
+
+  it('a grant from before 0.12 (no default agent) works as the connection: sub = act.sub, act still present', async () => {
+    const who = await person('ada')
+    cimd()
+    const made = await iamApp.fetch(new Request('http://iam.test/_/oauth/grants', {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${await serviceToken()}` },
+      body: JSON.stringify({ user_id: who.id, client_id: CIMD, client_name: 'Claude Code', resource: MCP, org_id: null, access: ['read', 'write'] }),
+    }))
+    expect(made.status).toBe(201)
+    const g = ((await made.json()) as { grant: { id: string; agent_id: string; actor: string } }).grant
+    const access = (await mintIdentityToken({
+      sub: g.agent_id, type: 'assistant', expires_in_seconds: 600, audience: MCP,
+      claims: { kind: 'agent', via: 'oauth', actor: g.actor, on_behalf_of: `user:${who.id}`, credential_id: g.id, access: ['read', 'write'], client: 'mcp', client_id: CIMD },
+    }))!
+    const b = claims((await json(await exchange(access)))['access_token'])
+    expect(b).toMatchObject({ sub: g.agent_id, actor: g.actor, act: { sub: g.agent_id, actor: g.actor } })
   })
 
   it('agent=software mints the realm token for the role agent, with act and sid, created on first use and found on the second', async () => {

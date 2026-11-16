@@ -27,7 +27,7 @@ import { kvTake, type KvClient } from '../db/client.js'
 import { audit, envelopeOf, personEnvelope, request, type AuditFields } from '../lib/audit.js'
 import { parseSession } from '../lib/cookies.js'
 import { AGENTS_SCOPE, EXCHANGED_TOKEN_SECONDS, SCOPES, accessTokenSeconds, endpoints, exchangers, issuerUrl, knownResources, offersAgents, scopesSupported } from '../lib/oauth/config.js'
-import { iamOauth, membershipsOf } from '../lib/oauth/iam.js'
+import { AGENT_NAME, agentsOf, iamOauth, membershipsOf, slugOfName } from '../lib/oauth/iam.js'
 import { orgServiceUrl } from '../lib/oauth/config.js'
 import { lookupClient, type OAuthClientInfo } from '../lib/oauth/clients.js'
 import { isLoopbackRedirect, redirectAllowed, redirectMatches } from '../lib/oauth/redirect.js'
@@ -48,8 +48,6 @@ const GRANT_EXCHANGE = 'urn:ietf:params:oauth:grant-type:token-exchange'
 const ACCESS_TOKEN_TYPE = 'urn:ietf:params:oauth:token-type:access_token'
 /** An MCP session id: visible ASCII, 1 to 64 characters (the `sid` claim). */
 const SESSION_ID = /^[\x21-\x7e]{1,64}$/
-/** A role agent's name, as iam's rule 5 has it. iam decides; this only spares it the junk. */
-const AGENT_NAME = /^[a-z][a-z0-9-]{0,31}$/
 const ASSERTION_TYPE = 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer'
 
 const sha256b64 = (s: string) => createHash('sha256').update(s).digest('base64url')
@@ -93,6 +91,8 @@ interface CodeRecord {
   resource: string
   org_id: string | null
   access: Array<'read' | 'write'>
+  /** The agent the connection works as by default, chosen on the consent page (or the remembered grant's). */
+  default_agent: string
   scope: string
   /** The grant may act as any of the person's agents (the `agents` scope was asked for and chosen). */
   agents: boolean
@@ -159,17 +159,17 @@ export function oauthRouter(kv: KvClient) {
     return u.toString()
   }
 
-  async function issueCode(c: Context, p: PendingRequest, client: OAuthClientInfo, org_id: string | null, access: Array<'read' | 'write'>, step: string): Promise<Response> {
+  async function issueCode(c: Context, p: PendingRequest, client: OAuthClientInfo, org_id: string | null, access: Array<'read' | 'write'>, default_agent: string, step: string): Promise<Response> {
     const code = random(32)
     // `agents` is granted only when it was asked for AND this resource still offers it: a form cannot add it.
     const agents = p.scope.includes(AGENTS_SCOPE) && offersAgents(p.resource)
     const record: CodeRecord = {
       user_id: p.user_id, client_id: p.client_id, client_name: client.client_name, redirect_uri: p.redirect_uri,
-      code_challenge: p.code_challenge, resource: p.resource, org_id, access, agents,
+      code_challenge: p.code_challenge, resource: p.resource, org_id, access, default_agent, agents,
       scope: [...access, ...(agents ? [AGENTS_SCOPE] : []), ...(p.scope.includes('offline_access') ? ['offline_access'] : [])].join(' '),
     }
     await kv.set(`oauth:code:${code}`, JSON.stringify(record), { ttl: CODE_TTL })
-    audit('oauth_authorize', { ...request(c), outcome: 'ok', step, client: 'ui', ...personEnvelope(p.user_id), client_id: p.client_id, resource: p.resource, resource_sent: p.resource_sent ? 'yes' : 'no', scope: record.scope, ...(org_id ? { org_id } : {}) })
+    audit('oauth_authorize', { ...request(c), outcome: 'ok', step, client: 'ui', ...personEnvelope(p.user_id), client_id: p.client_id, resource: p.resource, resource_sent: p.resource_sent ? 'yes' : 'no', scope: record.scope, default_agent, ...(org_id ? { org_id } : {}) })
     return c.redirect(back(p.redirect_uri, p.state, { code }))
   }
 
@@ -248,21 +248,33 @@ export function oauthRouter(kv: KvClient) {
     const orgs = await membershipsOf(user_id)
     const candidates: Array<string | null> = orgs.length ? orgs.map((o) => o.id) : [null]
     const found: Array<string | null> = []
+    const defaults = new Map<string | null, string>()
     for (const org_id of candidates.slice(0, 20)) {
       // `scopes` only when `agents` is asked for: a grant with it and one without are different consents, so adding it asks again.
       const r = await iamOauth<{ grant: unknown }>('POST', '/grants/find', { user_id, client_id: client.client_id, resource, org_id, access, ...(wants_agents ? { scopes: [...access, AGENTS_SCOPE] } : {}) })
-      if (r.status === 200 && r.data.grant) found.push(org_id)
+      if (r.status === 200 && r.data.grant) {
+        found.push(org_id)
+        // A remembered grant keeps its default agent. (A grant from before 0.12 answers the connection itself as its
+        // default and keeps working as it; the person chooses on the Agents tab or by refusing and agreeing again.)
+        const g = r.data.grant as { default_agent?: { name?: string; state?: string } }
+        if (g.default_agent?.name && g.default_agent.state === 'active') defaults.set(org_id, g.default_agent.name)
+      }
     }
     const remembered = found.length === 1 ? found[0]! : undefined
-    if (found.length === 1 && !isLoopbackRedirect(redirect_uri)) return issueCode(c, pending, client, remembered ?? null, access, 'approved_remembered')
+    if (found.length === 1 && !isLoopbackRedirect(redirect_uri) && defaults.has(found[0]!)) return issueCode(c, pending, client, remembered ?? null, access, defaults.get(found[0]!)!, 'approved_remembered')
 
     // 6. Ask. The pending request is remembered under an id only this person's session can answer.
+    // What the connection works as: the person's active agents, and a suggestion (iam's, else the client's name).
+    const mine = await agentsOf(user_id)
+    const last = await iamOauth<{ default_agent?: { name?: unknown } | null }>('GET', `/grants/suggest-default?user_id=${encodeURIComponent(user_id)}&client_id=${encodeURIComponent(client.client_id)}`)
+    const named = last.status === 200 ? last.data.default_agent?.name : undefined
+    const suggested = typeof named === 'string' && AGENT_NAME.test(named) ? named : slugOfName(client.client_name) || 'assistant'
     const id = random(24)
     await kv.set(`oauth:req:${id}`, JSON.stringify(pending), { ttl: REQ_TTL })
     audit('oauth_authorize', { ...req, outcome: 'ok', step: 'consent_shown', client: 'ui', ...personEnvelope(user_id), client_id: client.client_id, resource, resource_sent: sent ? 'yes' : 'no', scope: scope.join(' ') })
     return respond(c, consentPage({
       view: v, client_name: client.client_name, client_host: clientHost(client), redirect_host: new URL(redirect_uri).host, remembered_org: remembered ?? null,
-      localhost_only: client.redirect_uris.every(isLoopbackRedirect), resource, orgs, orgs_unavailable: !orgServiceUrl(), may_write, may_agents: wants_agents, actor, req: id,
+      localhost_only: client.redirect_uris.every(isLoopbackRedirect), resource, orgs, orgs_unavailable: !orgServiceUrl(), may_write, may_agents: wants_agents, actor, req: id, agents: mine, suggested_agent: suggested,
     }))
   })
 
@@ -278,9 +290,26 @@ export function oauthRouter(kv: KvClient) {
     if (!raw) return respond(c, oauthProblemPage(v, 'expired'), 400)
     const p = JSON.parse(raw) as PendingRequest
     if (p.user_id !== user_id) return respond(c, oauthProblemPage(v, 'person'), 403)
-    await kv.del(`oauth:req:${field('req')}`)
     const looked = await lookupClient(p.client_id)
-    if (!looked.ok) return respond(c, oauthProblemPage(v, 'client'), 400)
+    if (!looked.ok) { await kv.del(`oauth:req:${field('req')}`); return respond(c, oauthProblemPage(v, 'client'), 400) }
+
+    // What the connection works as: a name typed in the new-name field wins over the list; with neither the
+    // suggestion stands (a form that omits both is not a way to a connection that works as itself).
+    // A bad choice is shown to the person and the request is kept, so the browser's Back button works.
+    let default_agent = ''
+    if (field('decision') === 'approve') {
+      const typed = field('new_agent').trim(), picked = field('default_agent').trim()
+      if (typed) {
+        if (!AGENT_NAME.test(typed)) return respond(c, oauthProblemPage(v, 'agent'), 400)
+        default_agent = typed
+      } else if (picked) {
+        if (!((await agentsOf(user_id)) ?? []).some((a) => a.name === picked)) return respond(c, oauthProblemPage(v, 'agent'), 400)
+        default_agent = picked
+      } else {
+        default_agent = slugOfName(looked.client.client_name) || 'assistant'
+      }
+    }
+    await kv.del(`oauth:req:${field('req')}`)
 
     if (field('decision') !== 'approve') {
       audit('oauth_authorize', { ...req, outcome: 'refused', step: 'consent_refused', reason: 'access_denied', client: 'ui', ...personEnvelope(user_id), client_id: p.client_id, resource: p.resource, resource_sent: p.resource_sent ? 'yes' : 'no' })
@@ -295,7 +324,7 @@ export function oauthRouter(kv: KvClient) {
     }
     // Read unless write was asked for AND chosen: a form cannot widen what the client asked.
     const access: Array<'read' | 'write'> = field('access') === 'write' && p.scope.includes('write') ? ['read', 'write'] : ['read']
-    return issueCode(c, p, looked.client, org_id, access, 'approved')
+    return issueCode(c, p, looked.client, org_id, access, default_agent, 'approved')
   })
 
   // ── /token ─────────────────────────────────────────────────────────────────
@@ -381,6 +410,7 @@ export function oauthRouter(kv: KvClient) {
       const made = await iamOauth<{ grant?: any; refresh_token?: string; error?: string }>('POST', '/grants', {
         user_id: rec.user_id, client_id: rec.client_id, client_name: rec.client_name, resource: rec.resource, org_id: rec.org_id, access: rec.access,
         ...(rec.agents ? { scopes: [...rec.access, AGENTS_SCOPE] } : {}),
+        default_agent: rec.default_agent,
       })
       if (made.status === 0 || made.status >= 500) return refuse(502, 'server_error', 'iam_unavailable', { client_id: client.client_id })
       if (made.status !== 201 || !made.data.grant || !made.data.refresh_token) return refuse(400, 'invalid_grant', `grant_${made.data.error ?? made.status}`, { client_id: client.client_id })
@@ -388,7 +418,7 @@ export function oauthRouter(kv: KvClient) {
       await kv.set(`oauth:used:${sha256b64(code)}`, g.id, { ttl: CODE_TTL })
       const token = await mintFor(g, rec.resource, accessTokenSeconds())
       if (!token) return oauthError(c, 500, 'server_error')
-      audit('oauth_token', { ...req, outcome: 'ok', step: 'code_exchanged', ...agentEnvelope(g), client_id: client.client_id, resource: rec.resource, resource_sent: given ? 'yes' : 'no', grant_id: g.id, scope: rec.scope })
+      audit('oauth_token', { ...req, outcome: 'ok', step: 'code_exchanged', ...agentEnvelope(g), client_id: client.client_id, resource: rec.resource, resource_sent: given ? 'yes' : 'no', grant_id: g.id, scope: rec.scope, ...(g.default_agent?.name ? { default_agent: g.default_agent.name } : { default_agent: rec.default_agent }) })
       noStore(c)
       return c.json({ access_token: token, token_type: 'Bearer', expires_in: accessTokenSeconds(), refresh_token: made.data.refresh_token, scope: rec.scope })
     }
@@ -458,19 +488,28 @@ export function oauthRouter(kv: KvClient) {
     // The access token lives an hour: whether the grant is still good is asked of iam at every exchange, so a revocation
     // (or a suspended or removed agent, or a removed owner) stops tool calls within the realm token's five minutes.
     if (!agent) {
-      const live = await iamOauth<{ live?: boolean; reason?: string }>('GET', `/grants/${encodeURIComponent(grant_id)}`)
+      // A connection never works as itself (design §3a): the token is for the grant's default agent, with the connection
+      // in `act`, always. A grant made before 0.12 has none chosen, and its default is the connection itself (sub = act.sub).
+      const live = await iamOauth<{ live?: boolean; reason?: string; default_agent?: { id?: string; name?: string; actor?: string; state?: string } }>('GET', `/grants/${encodeURIComponent(grant_id)}`)
       if (live.status === 0 || live.status >= 500) return refuse(502, 'server_error', 'iam_unavailable', { grant_id })
       if (live.status !== 200 || live.data.live !== true) return refuse(400, 'invalid_grant', `grant_not_live_${live.data.reason ?? 'unknown'}`, { grant_id })
       const p = principalOf({ ...claims, ...sidClaim })
-      const token = await mintIdentityToken({
-        sub: String(claims.sub), type: 'assistant', expires_in_seconds: ttl,
-        claims: {
-          kind: 'agent', via: 'oauth', actor: p.actor, ...(p.on_behalf_of ? { on_behalf_of: p.on_behalf_of } : {}), credential_id: claims['credential_id'],
-          ...(p.access ? { access: p.access } : {}), ...(p.org_id ? { org_id: p.org_id } : {}), client: 'mcp', ...client_id, ...sidClaim,
-        },
-      })
+      const d = live.data.default_agent
+      const own = !d || !d.id || d.id === String(claims.sub)
+      if (d && d.state && d.state !== 'active') {
+        // The connection is not revoked; the person picks another default on the Agents tab.
+        return refuse(400, 'invalid_target', d.state === 'removed' ? 'agent_removed' : 'agent_inactive', { grant_id, ...client_id, default_agent: d.name ?? '' })
+      }
+      if (!own && (typeof d!.actor !== 'string' || !d!.actor)) return refuse(502, 'server_error', 'iam_default_agent_malformed', { grant_id, ...client_id })
+      const worker = own ? { id: String(claims.sub), actor: p.actor } : { id: d!.id!, actor: d!.actor! }
+      const role_claims = {
+        kind: 'agent', via: 'oauth', actor: worker.actor, ...(p.on_behalf_of ? { on_behalf_of: p.on_behalf_of } : {}), credential_id: claims['credential_id'],
+        act: { sub: String(claims.sub), actor: p.actor },
+        ...(p.access ? { access: p.access } : {}), ...(p.org_id ? { org_id: p.org_id } : {}), client: 'mcp', ...client_id, ...sidClaim,
+      }
+      const token = await mintIdentityToken({ sub: worker.id, type: 'assistant', expires_in_seconds: ttl, claims: role_claims })
       if (!token) return oauthError(c, 500, 'server_error')
-      audit('oauth_token', { ...req, outcome: 'ok', step: 'exchanged', client: 'mcp', ...envelopeOf(p, 'mcp'), ...client_id, grant_id })
+      audit('oauth_token', { ...req, outcome: 'ok', step: 'exchanged', client: 'mcp', ...envelopeOf(principalOf({ sub: worker.id, type: 'assistant', ...role_claims }), 'mcp'), ...client_id, grant_id, default_agent: d?.name ?? '' })
       noStore(c)
       return c.json({ access_token: token, issued_token_type: ACCESS_TOKEN_TYPE, token_type: 'Bearer', expires_in: ttl })
     }
